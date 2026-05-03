@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>二手房数据分析报告 — {{ session_id[:8] }}…</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; color: #1a1a1a; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.15rem; margin-top: 2rem; }
+    .muted { color: #666; font-size: 0.9rem; }
+    .grid { display: grid; gap: 16px; }
+    .card { border: 1px solid #e6e6e6; border-radius: 8px; padding: 12px; background: #fafafa; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #fff; padding: 12px; border-radius: 6px; border: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h1>二手房数据分析报告</h1>
+  <p class="muted">会话 ID：<code>{{ session_id }}</code></p>
+
+  <h2>清洗摘要</h2>
+  <pre>{{ cleaning_notes or "（无）" }}</pre>
+
+  {% if narrative %}
+  <h2>分析要点</h2>
+  <div class="card"><pre style="white-space:pre-wrap;font-family:inherit;margin:0;">{{ narrative }}</pre></div>
+  {% endif %}
+
+  <h2>关键指标</h2>
+  <div class="card grid">
+    <div>样本行数：<strong>{{ analysis.get("row_count", 0) }}</strong></div>
+    {% if analysis.get("unit_price_quantiles") %}
+    <div>单价分位数（元/㎡）：{{ analysis.unit_price_quantiles }}</div>
+    {% endif %}
+  </div>
+
+  <h2>交互图表</h2>
+  <div class="grid">
+    {% for name, html in figures.items() %}
+      <div class="card">
+        <div class="muted">{{ name }}</div>
+        {{ html | safe }}
+      </div>
+    {% endfor %}
+    {% if figures|length == 0 %}
+      <p class="muted">当前样本不足以生成图表。</p>
+    {% endif %}
+  </div>
+
+  <p class="muted" style="margin-top:3rem;">本报告由 HouseInsight Agent 自动生成，仅供研究演示，不构成任何交易建议。</p>
+</body>
+</html>

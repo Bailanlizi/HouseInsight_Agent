@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "houseinsight-agent"
+version = "0.1.0"
+description = "二手房专属数据分析 Agent（FastAPI + LangChain + LangGraph）"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.9",
+    "pydantic-settings>=2.6.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "plotly>=5.24.0",
+    "jinja2>=3.1.4",
+    "openpyxl>=3.1.5",
+    "xlrd>=2.0.1",
+    "langchain>=1.0.0",
+    "langgraph>=1.0.0",
+    "langchain-openai>=0.3.0",
+]
+
+[project.optional-dependencies]
+pdf = ["weasyprint>=62.0"]
+dev = ["pytest>=8.3.0", "httpx>=0.27.0", "xlwt>=1.3.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

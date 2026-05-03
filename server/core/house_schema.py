@@ -1,0 +1,88 @@
+"""二手房标准字段与同义词映射（仅用于本项目 ingest/clean）。"""
+
+from __future__ import annotations
+
+STANDARD_COLUMNS: dict[str, str] = {
+    "district": "城区",
+    "community": "小区",
+    "layout": "户型",
+    "area_m2": "建筑面积㎡",
+    "total_price": "总价万元",
+    "unit_price": "单价元每平米",
+    "floor": "楼层",
+    "floor_band": "楼层档低中高",
+    "orientation": "朝向",
+    "build_year": "建筑年代",
+    "list_date": "挂牌日期",
+    "decoration": "装修",
+    "followers": "关注人数",
+    "listing_title": "房源标题",
+    "house_info_raw": "房屋信息原文",
+    "follow_info_raw": "关注信息原文",
+    "listing_id": "房源编号",
+    "building_type": "建筑类型",
+    "description_raw": "描述原文",
+    "location_raw": "位置信息原文",
+}
+
+STANDARD_COLUMN_KEYS: frozenset[str] = frozenset(STANDARD_COLUMNS.keys())
+
+# 常见导出表头 -> 内部标准键
+COLUMN_ALIASES: dict[str, str] = {
+    "城区": "district",
+    "区域": "district",
+    "行政区": "district",
+    "区县": "district",
+    "小区": "community",
+    "楼盘": "community",
+    "小区名称": "community",
+    "户型": "layout",
+    "房型": "layout",
+    "室厅": "layout",
+    "建筑面积": "area_m2",
+    "面积": "area_m2",
+    "建面": "area_m2",
+    "㎡": "area_m2",
+    "平米": "area_m2",
+    "总价": "total_price",
+    "挂牌价": "total_price",
+    "价格": "total_price",
+    "万元": "total_price",
+    "单价": "unit_price",
+    "元/㎡": "unit_price",
+    "元/m²": "unit_price",
+    "楼层": "floor",
+    "所在楼层": "floor",
+    "楼层档": "floor_band",
+    "低中高层": "floor_band",
+    "朝向": "orientation",
+    "建筑年代": "build_year",
+    "建成年代": "build_year",
+    "房龄": "build_year",
+    "年代": "build_year",
+    "挂牌日期": "list_date",
+    "挂牌时间": "list_date",
+    "装修": "decoration",
+    "装修情况": "decoration",
+    "装修类型": "decoration",
+    "关注": "followers",
+    "关注人数": "followers",
+    "关注度": "followers",
+    "房源标题": "listing_title",
+    "标题": "listing_title",
+    "房屋信息": "house_info_raw",
+    "房源信息": "house_info_raw",
+    "关注信息": "follow_info_raw",
+    "房源编号": "listing_id",
+    "编号": "listing_id",
+    "建筑类型": "building_type",
+    "房屋类型": "building_type",
+    "物业类型": "building_type",
+    "描述": "description_raw",
+    "位置信息": "location_raw",
+}
+
+
+def normalize_header(name: str) -> str:
+    s = str(name).strip().replace(" ", "")
+    return COLUMN_ALIASES.get(s, s)
