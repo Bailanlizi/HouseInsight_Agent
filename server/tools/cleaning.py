@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from server.core.session_store import SessionStore
+from server.tools.listing_numeric_parse import parse_object_numeric_columns, promote_staging_columns
 
 # 去重子集：至少两列且各列非空比例达标，避免「仅按总价」等单列把数千行压成一行。
 # 含原文/标题类列，避免同城同价多套房源被误并为一条。
@@ -87,7 +88,9 @@ def remove_price_outliers_iqr(df: pd.DataFrame, col: str = "unit_price", k: floa
 def apply_default_cleaning_pipeline(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     notes: list[str] = []
     before = len(df)
-    work = coerce_numeric_columns(df)
+    work = promote_staging_columns(df)
+    work = parse_object_numeric_columns(work)
+    work = coerce_numeric_columns(work)
     work = fill_unit_price_from_total_and_area(work)
     subset = resolve_listing_dedup_subset(work)
     work = drop_exact_duplicates(work, subset=subset)
@@ -116,8 +119,10 @@ def make_cleaning_tools(store: SessionStore, session_id: str):
         st = store.require(session_id)
         if st.df_clean is None:
             return "错误：清洗表为空。"
-        st.df_clean = coerce_numeric_columns(st.df_clean)
-        return "数值列转换完成"
+        from server.tools.listing_numeric_parse import finalize_listing_dataframe
+
+        st.df_clean = finalize_listing_dataframe(st.df_clean)
+        return "已解析「万/元/㎡」文本并数值化、填补单价（如有总价与面积）"
 
     @tool
     def fill_unit_price_missing() -> str:

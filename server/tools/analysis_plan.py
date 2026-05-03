@@ -27,6 +27,7 @@ class AnalysisTaskType(str, Enum):
     total_area_scatter = "total_area_scatter"
     price_outlier_flag = "price_outlier_flag"
     unit_price_histogram = "unit_price_histogram"
+    area_band_share_pie = "area_band_share_pie"
 
 
 class PlannedTask(BaseModel):
@@ -68,10 +69,21 @@ def execute_task(df: pd.DataFrame, task: PlannedTask) -> dict[str, Any]:
             sub = df[["district", "unit_price"]].copy()
             sub["unit_price"] = _num(sub["unit_price"])
             sub = sub.dropna()
-            agg = sub.groupby("district", dropna=False)["unit_price"].mean().reset_index().sort_values("unit_price", ascending=False)
+            agg = (
+                sub.groupby("district", dropna=False)["unit_price"]
+                .mean()
+                .reset_index()
+                .sort_values("unit_price", ascending=False)
+            )
+            agg["unit_price"] = pd.to_numeric(agg["unit_price"], errors="coerce")
+            agg = agg.dropna(subset=["unit_price"])
+            if agg.empty or len(agg) < 1:
+                out["reason"] = "城区单价有效样本不足"
+                return out
             out["ok"] = True
             out["chart_kind"] = "bar"
-            out["title"] = "城区均价排行（元/㎡）"
+            out["bar_horizontal"] = True
+            out["title"] = "各城区二手房均价排行（元/㎡）"
             out["records"] = agg.to_dict(orient="records")
             out["x"] = "district"
             out["y"] = "unit_price"
@@ -108,6 +120,27 @@ def execute_task(df: pd.DataFrame, task: PlannedTask) -> dict[str, Any]:
             out["records"] = gg.astype({"band": str}).to_dict(orient="records")
             out["x"] = "band"
             out["y"] = "unit_price"
+
+        elif t == AnalysisTaskType.area_band_share_pie:
+            if "area_m2" not in df.columns or len(df) < _MIN_N:
+                out["reason"] = "需要 area_m2"
+                return out
+            sub = df[["area_m2"]].copy()
+            sub["area_m2"] = _num(sub["area_m2"])
+            sub = sub.dropna()
+            if len(sub) < _MIN_N:
+                out["reason"] = "面积有效样本不足"
+                return out
+            bins = [0, 60, 90, 120, 150, 10_000]
+            labels = ["<=60", "60-90", "90-120", "120-150", ">150"]
+            sub["band"] = pd.cut(sub["area_m2"], bins=bins, labels=labels, right=True)
+            vc = sub.groupby("band", observed=True).size().reset_index(name="count")
+            out["ok"] = True
+            out["chart_kind"] = "pie"
+            out["title"] = "面积段套数占比"
+            out["records"] = vc.astype({"band": str}).to_dict(orient="records")
+            out["pie_names"] = "band"
+            out["pie_values"] = "count"
 
         elif t == AnalysisTaskType.decoration_price_compare:
             if not _need_cols(df, ["decoration", "unit_price"]) or len(df) < _MIN_N:
@@ -237,6 +270,8 @@ def fallback_plan(df: pd.DataFrame) -> list[PlannedTask]:
         tasks.append(PlannedTask(type=AnalysisTaskType.layout_price_box))
     if _need_cols(df, ["area_m2", "unit_price"]):
         tasks.append(PlannedTask(type=AnalysisTaskType.area_band_price))
+    if "area_m2" in df.columns:
+        tasks.append(PlannedTask(type=AnalysisTaskType.area_band_share_pie))
     if _need_cols(df, ["decoration", "unit_price"]):
         tasks.append(PlannedTask(type=AnalysisTaskType.decoration_price_compare))
     if _need_cols(df, ["floor_band", "unit_price"]):
@@ -258,14 +293,15 @@ _PLAN_PROMPT = """你是二手房数据分析负责人。根据「数据画像�
 {"tasks":[{"type":"任务类型枚举"}, ...]}
 
 可选 type（字符串必须完全一致）：
-district_price_rank, layout_price_box, area_band_price, decoration_price_compare,
+district_price_rank, layout_price_box, area_band_price, area_band_share_pie, decoration_price_compare,
 floor_band_price, building_age_price_trend, community_followers_rank,
 total_area_scatter, price_outlier_flag, unit_price_histogram
 
 规则：
 - 缺少必填列时不要选该任务（例如 decoration_price_compare 需要 decoration 与 unit_price）。
 - 样本行数过少时少选复杂任务。
-- 优先区域房价、户型/面积与价格、若有 decoration/floor_band/followers 则各选一项。
+- 优先：区域均价（district_price_rank，对应横向柱状图更易读）、户型与单价、面积段均价与面积段占比饼图。
+- 若有 decoration/floor_band/followers 则各选一项。
 """
 
 

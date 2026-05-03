@@ -12,9 +12,11 @@ from server.core.config import Settings, get_settings
 from server.core.paths import ProjectPaths
 from server.core.session_store import SessionStore
 from server.tools.analysis import analyze_second_hand_listings
+from server.tools.analysis_narrative import enrich_analysis_markdown
 from server.tools.analysis_plan import plan_analysis_with_llm, run_planned_analysis
 from server.tools.cleaning import apply_default_cleaning_pipeline
 from server.tools.data_quality import assess_clean_quality, coach_clean_retry_hints
+from server.tools.listing_numeric_parse import finalize_listing_dataframe
 from server.tools.export import maybe_render_pdf, render_report_html, write_excel_report
 from server.tools.io import canonicalize_known_aliases, iter_tabular_paths, load_raw_directory
 from server.tools.registry import build_cleaning_tools_for_session
@@ -24,6 +26,15 @@ from server.tools.viz import figures_from_analysis
 class PipelineState(TypedDict, total=False):
     session_id: str
     error: str | None
+
+
+_CLEANING_BEHAVIOR_GUIDE = """\
+【成都二手房数据范例 — 你应按类似逻辑处理】
+• 房屋信息「3室2厅|89平米|南|精装|中楼层(共26层)|2016年建|板楼」→ 拆成户型、面积、朝向、装修、楼层、建成年份、结构；过渡列务必使用标准键名：layout_str、area_m2_str、orientation_str、floor_text、build_year、building_type 等，再 apply_column_rename 到 layout、area_m2… 勿发明非标准键。
+• 关注信息「135人关注/6个月以前发布」→ followers、发布时间相关列。
+• 「153万」「17190元/平米」「89㎡」→ 写入 total_price(万元)、unit_price(元/㎡)、area_m2；解析会在收尾自动加固。
+• 区域「青羊」等 → district。
+分析侧偏好：区域均价用横向条形更易读；户型对比均价；面积段统计 + 占比饼图。"""
 
 
 def _emit(store: SessionStore, session_id: str, stage: str, pct: int, msg: str) -> None:
@@ -134,9 +145,10 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         tools = build_cleaning_tools_for_session(store, sid)
 
         base_user = (
-            "请清洗当前会话中的二手房挂牌表："
-            "优先依据画像做领域拆分与标准化，再保证 district、layout、area_m2、"
-            "total_price、unit_price 等核心字段可用于统计分析。"
+            "请清洗当前会话中的二手房挂牌表（成都等 Excel 常见格式）：\n"
+            + _CLEANING_BEHAVIOR_GUIDE
+            + "\n执行：先 get_dataset_profile，再按需拆分/映射/数值化，保证 district、layout、area_m2、"
+            "total_price、unit_price 可用于统计。"
         )
         if st.clean_attempt_count > 1 and (st.quality_coach_hint or "").strip():
             user_content = (
@@ -156,13 +168,12 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
                     system_prompt=(
                         "你是二手房挂牌数据清洗专家（ReAct：观察画像→调用工具→再观察），"
                         "只能通过工具修改会话中的 df_clean。"
-                        "流程：先调用 get_dataset_profile 查看列缺失率、样例值以及 |、/ 分隔启发；"
-                        "再按画像调用拆分（split_delimited_column_tool、split_slash_field_tool）、"
-                        "楼层档（derive_floor_band_tool）、装修（normalize_decoration_tool）、"
-                        "关注人数（coerce_followers_tool）、列映射（apply_column_rename_tool）。"
-                        "若收到「质检反馈」，必须优先针对性修正后再考虑一键默认流水线。"
-                        "若表结构简单、无复合字段，可再调用 run_full_default_clean 或分步数值清洗。"
-                        "不要编造列或数值；完成后用简短中文说明做了哪些清洗步骤。"
+                        "流程：先 get_dataset_profile；再按需 split_delimited（|）、split_slash（/）、"
+                        "derive_floor_band、normalize_decoration、coerce_followers、apply_column_rename。"
+                        "拆分出的过渡列必须使用 house_schema 已定义的标准键（含 layout_str、area_m2_str、"
+                        "orientation_str、floor_text、publish_time_raw、followers_str 等），禁止臆造未注册键名。"
+                        "若收到「质检反馈」，优先按要求修正；复杂表可先领域拆分再 run_full_default_clean。"
+                        "完成后简短中文总结步骤。"
                     ),
                 )
                 result = agent.invoke(
@@ -185,7 +196,8 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             st.cleaning_notes = note
             st.cleaning_trace.append("apply_default_cleaning_pipeline(no_api_key)")
 
-        _emit(store, sid, "clean", 52, f"第 {st.clean_attempt_count} 轮清洗完成")
+        st.df_clean = finalize_listing_dataframe(st.df_clean)
+        _emit(store, sid, "clean", 52, f"第 {st.clean_attempt_count} 轮清洗完成（已文本数值加固）")
         return {"session_id": sid, "error": None}
 
     def node_quality_gate(state: PipelineState) -> PipelineState:
@@ -229,6 +241,7 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         st = store.require(sid)
         base = st.df_clean if st.df_clean is not None else st.df_raw
         base = base if base is not None else pd.DataFrame()
+        base = finalize_listing_dataframe(base)
 
         _emit(store, sid, "analyze", 62, "生成分析计划…")
         planned_tasks, raw_plan = plan_analysis_with_llm(base, settings)
@@ -239,12 +252,13 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         legacy = analyze_second_hand_listings(base)
         planned_out = run_planned_analysis(base, planned_tasks)
         st.analysis = {**legacy, **planned_out}
-        summary = planned_out.get("analysis_summary_markdown", "")
-        if not st.quality_report.get("passed"):
+        summary = enrich_analysis_markdown(settings, base, {**st.analysis})
+        if st.quality_report.get("passed") is False:
             summary = (
                 "【质检提示】已达到最大清洗次数或本轮质检未通过，以下为降级分析，请结合 quality_report 排查。\n"
                 + summary
             )
+        st.analysis["analysis_summary_markdown"] = summary
         st.analysis_summary_markdown = summary
         _emit(store, sid, "analyze", 75, "分析完成")
         return {"session_id": sid, "error": None}
@@ -255,6 +269,7 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             return state
         st = store.require(sid)
         df = st.df_clean if st.df_clean is not None else pd.DataFrame()
+        df = finalize_listing_dataframe(df) if not df.empty else df
         _emit(store, sid, "viz", 80, "生成交互图表…")
         st.figures = figures_from_analysis(df, st.analysis)
         _emit(store, sid, "viz", 88, "图表完成")

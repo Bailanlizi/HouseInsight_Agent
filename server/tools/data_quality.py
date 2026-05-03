@@ -20,17 +20,23 @@ def _unit_price_valid_ratio(df: pd.DataFrame) -> float:
     if "unit_price" not in df.columns or len(df) == 0:
         return 0.0
     s = pd.to_numeric(df["unit_price"], errors="coerce")
-    ok = s.notna() & (s > 100) & (s < 500_000)
+    # 成都等：单价多在几千～几万/㎡；过低可能是误标为「万/㎡」的小数，交由前置解析修正
+    ok = s.notna() & (s > 30) & (s < 600_000)
     return float(ok.mean())
 
 
+def _meaningful_str_mask(ser: pd.Series) -> pd.Series:
+    s = ser.fillna("").astype(str).str.strip()
+    return s.ne("") & ~s.str.lower().isin(("nan", "none", "null", "待定"))
+
+
 def _geo_ratio(df: pd.DataFrame) -> float:
-    """district 或 community 至少其一有值的比例。"""
+    """district 或 community 至少其一有有效文本的比例。"""
     if len(df) == 0:
         return 0.0
-    d = df["district"] if "district" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
-    c = df["community"] if "community" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
-    either = d.notna() | c.notna()
+    d = df["district"] if "district" in df.columns else pd.Series([""] * len(df), index=df.index)
+    c = df["community"] if "community" in df.columns else pd.Series([""] * len(df), index=df.index)
+    either = _meaningful_str_mask(d) | _meaningful_str_mask(c)
     return float(either.mean())
 
 
@@ -86,12 +92,13 @@ def assess_clean_quality(
     metrics["total_price_non_null_ratio"] = round(tp_ok, 4)
     metrics["area_m2_non_null_ratio"] = round(ar_ok, 4)
 
-    price_ok = up_r >= min_up or (tp_ok >= 0.25 and ar_ok >= 0.25)
+    derivable = tp_ok >= 0.2 and ar_ok >= 0.2
+    price_ok = up_r >= min_up or (tp_ok >= 0.25 and ar_ok >= 0.25) or derivable
     if not price_ok:
         failures.append("price_fields_weak")
         hints.append(
             "单价有效占比过低，且总价+建筑面积不足以推算单价；"
-            "请数值化 total_price/unit_price/area_m2，或用总面积与总价填补缺失单价。"
+            "请解析「153万」「17190元/平米」类文本并映射到 total_price/unit_price/area_m2。"
         )
 
     geo_r = _geo_ratio(df_clean)

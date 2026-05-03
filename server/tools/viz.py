@@ -7,9 +7,28 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
-def _bar_from_records(records: list[dict[str, Any]], x: str, y: str, title: str, include_plotlyjs: str | bool) -> str:
+def _bar_from_records(
+    records: list[dict[str, Any]],
+    x: str,
+    y: str,
+    title: str,
+    include_plotlyjs: str | bool,
+    *,
+    horizontal: bool = False,
+    x_title: str | None = None,
+    y_title: str | None = None,
+) -> str:
     sub = pd.DataFrame(records)
-    fig = px.bar(sub, x=x, y=y, title=title)
+    if y in sub.columns:
+        sub[y] = pd.to_numeric(sub[y], errors="coerce")
+        sub = sub.dropna(subset=[y])
+    if horizontal:
+        fig = px.bar(sub, x=y, y=x, orientation="h", title=title)
+        fig.update_layout(xaxis_title=x_title or y, yaxis_title=y_title or x)
+    else:
+        fig = px.bar(sub, x=x, y=y, title=title)
+        fig.update_layout(xaxis_title=x_title or x, yaxis_title=y_title or y)
+    fig.update_layout(template="plotly_white", margin=dict(l=80, r=40, t=50, b=80))
     return fig.to_html(full_html=False, include_plotlyjs=include_plotlyjs)
 
 
@@ -26,9 +45,28 @@ def figures_from_task_results(df: pd.DataFrame, task_results: dict[str, Any]) ->
 
         try:
             if kind == "bar" and spec.get("records") and spec.get("x") and spec.get("y"):
-                html = _bar_from_records(spec["records"], spec["x"], spec["y"], title, first_js)
+                hz = bool(spec.get("bar_horizontal"))
+                html = _bar_from_records(
+                    spec["records"],
+                    spec["x"],
+                    spec["y"],
+                    title,
+                    first_js,
+                    horizontal=hz,
+                    x_title="单价（元/㎡）" if hz else None,
+                    y_title="城区" if hz and spec.get("x") == "district" else None,
+                )
                 figures[name] = html
                 first_js = False
+            elif kind == "pie" and spec.get("records"):
+                sub = pd.DataFrame(spec["records"])
+                nc = spec.get("pie_names") or "band"
+                vc = spec.get("pie_values") or "count"
+                if nc in sub.columns and vc in sub.columns:
+                    fig = px.pie(sub, names=nc, values=vc, title=title, hole=0.28)
+                    fig.update_layout(template="plotly_white", margin=dict(t=50, b=40))
+                    figures[name] = fig.to_html(full_html=False, include_plotlyjs=first_js)
+                    first_js = False
             elif kind == "box" and spec.get("records"):
                 sub = pd.DataFrame(spec["records"])
                 if "category" in sub.columns and "unit_price" in sub.columns:
@@ -64,14 +102,14 @@ def _figures_legacy_fallback(df: pd.DataFrame, *, cdn: bool) -> dict[str, str]:
     figures: dict[str, str] = {}
     js: str | bool = "cdn" if cdn else False
     if "district" in df.columns and "unit_price" in df.columns:
-        agg = (
-            df.groupby("district", dropna=False)["unit_price"]
-            .mean()
-            .reset_index()
-            .sort_values("unit_price", ascending=False)
+        t = df[["district", "unit_price"]].copy()
+        t["unit_price"] = pd.to_numeric(t["unit_price"], errors="coerce")
+        agg = t.groupby("district", dropna=False)["unit_price"].mean().reset_index().sort_values(
+            "unit_price", ascending=False
         )
-        fig = px.bar(agg, x="district", y="unit_price", title="城区均价（元/㎡）")
-        fig.update_layout(xaxis_title="城区", yaxis_title="单价")
+        agg = agg.dropna(subset=["unit_price"])
+        fig = px.bar(agg, x="unit_price", y="district", orientation="h", title="各城区均价（元/㎡）")
+        fig.update_layout(xaxis_title="单价（元/㎡）", yaxis_title="城区", template="plotly_white")
         figures["district_avg_unit_price"] = fig.to_html(full_html=False, include_plotlyjs=js)
         js = False
     if "unit_price" in df.columns:
@@ -96,14 +134,14 @@ def figures_from_analysis(df: pd.DataFrame, analysis: dict[str, Any]) -> dict[st
     figures: dict[str, str] = {}
 
     if "district" in df.columns and "unit_price" in df.columns:
-        agg = (
-            df.groupby("district", dropna=False)["unit_price"]
-            .mean()
-            .reset_index()
-            .sort_values("unit_price", ascending=False)
+        t = df[["district", "unit_price"]].copy()
+        t["unit_price"] = pd.to_numeric(t["unit_price"], errors="coerce")
+        agg = t.groupby("district", dropna=False)["unit_price"].mean().reset_index().sort_values(
+            "unit_price", ascending=False
         )
-        fig = px.bar(agg, x="district", y="unit_price", title="城区均价（元/㎡）")
-        fig.update_layout(xaxis_title="城区", yaxis_title="单价")
+        agg = agg.dropna(subset=["unit_price"])
+        fig = px.bar(agg, x="unit_price", y="district", orientation="h", title="各城区均价（元/㎡）")
+        fig.update_layout(xaxis_title="单价（元/㎡）", yaxis_title="城区", template="plotly_white")
         figures["district_avg_unit_price"] = fig.to_html(full_html=False, include_plotlyjs="cdn")
 
     if "unit_price" in df.columns:

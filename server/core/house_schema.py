@@ -23,6 +23,14 @@ STANDARD_COLUMNS: dict[str, str] = {
     "building_type": "建筑类型",
     "description_raw": "描述原文",
     "location_raw": "位置信息原文",
+    # 拆分过渡列（与 layout、area_m2 等价写入前可暂存，避免 LLM 臆造非标准键名报错）
+    "area_m2_str": "面积拆分过渡",
+    "area_m2_text": "面积拆分过渡2",
+    "layout_str": "户型拆分过渡",
+    "orientation_str": "朝向拆分过渡",
+    "floor_text": "楼层原文",
+    "publish_time_raw": "发布时间原文",
+    "followers_str": "关注人数过渡",
 }
 
 STANDARD_COLUMN_KEYS: frozenset[str] = frozenset(STANDARD_COLUMNS.keys())
