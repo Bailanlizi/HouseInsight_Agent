@@ -30,7 +30,7 @@ class PipelineState(TypedDict, total=False):
 
 _CLEANING_BEHAVIOR_GUIDE = """\
 【成都二手房数据范例 — 你应按类似逻辑处理】
-• 房屋信息「3室2厅|89平米|南|精装|中楼层(共26层)|2016年建|板楼」→ 拆成户型、面积、朝向、装修、楼层、建成年份、结构；过渡列务必使用标准键名：layout_str、area_m2_str、orientation_str、floor_text、build_year、building_type 等，再 apply_column_rename 到 layout、area_m2… 勿发明非标准键。
+• 房屋信息「3室2厅|89平米|南|精装|中楼层(共26层)|2016年建|板楼」→ 拆成户型、面积、朝向、装修、楼层、建成年份、结构；过渡列务必使用标准键名：layout_str、area_m2_str、decoration_str、building_type_str、orientation_str、floor_text、build_year 等，再 apply_column_rename 到正式列；勿发明未注册键。
 • 关注信息「135人关注/6个月以前发布」→ followers、发布时间相关列。
 • 「153万」「17190元/平米」「89㎡」→ 写入 total_price(万元)、unit_price(元/㎡)、area_m2；解析会在收尾自动加固。
 • 区域「青羊」等 → district。
@@ -171,7 +171,8 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
                         "流程：先 get_dataset_profile；再按需 split_delimited（|）、split_slash（/）、"
                         "derive_floor_band、normalize_decoration、coerce_followers、apply_column_rename。"
                         "拆分出的过渡列必须使用 house_schema 已定义的标准键（含 layout_str、area_m2_str、"
-                        "orientation_str、floor_text、publish_time_raw、followers_str 等），禁止臆造未注册键名。"
+                        "decoration_str、building_type_str、orientation_str、floor_text、publish_time_raw、"
+                        "followers_str 等），禁止臆造未注册键名。"
                         "若收到「质检反馈」，优先按要求修正；复杂表可先领域拆分再 run_full_default_clean。"
                         "完成后简短中文总结步骤。"
                     ),
@@ -189,7 +190,12 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
                 st.cleaning_notes = (st.cleaning_notes + "\n" + str(note)).strip()
             except Exception as e:
                 st.df_clean, note = apply_default_cleaning_pipeline(st.df_raw.copy())
-                st.cleaning_notes = f"LLM 清洗失败，已回退默认规则: {e}. {note}"
+                fallback_head = (
+                    "【清洗说明】智能体在某次工具调用中出错，已自动改用默认规则并完成数值解析加固；"
+                    "下方数据仍可用于分析与图表。\n"
+                    f"（报错摘要）{e}"
+                )
+                st.cleaning_notes = (st.cleaning_notes + "\n\n" + fallback_head + "\n\n" + note).strip()
                 st.cleaning_trace.append("apply_default_cleaning_pipeline(fallback_after_llm_error)")
         else:
             st.df_clean, note = apply_default_cleaning_pipeline(st.df_raw.copy())

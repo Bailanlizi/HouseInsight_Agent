@@ -31,6 +31,8 @@ STANDARD_COLUMNS: dict[str, str] = {
     "floor_text": "楼层原文",
     "publish_time_raw": "发布时间原文",
     "followers_str": "关注人数过渡",
+    "decoration_str": "装修拆分过渡",
+    "building_type_str": "建筑类型拆分过渡",
 }
 
 STANDARD_COLUMN_KEYS: frozenset[str] = frozenset(STANDARD_COLUMNS.keys())

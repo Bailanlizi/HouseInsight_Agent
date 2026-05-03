@@ -100,6 +100,8 @@ _STAGING_PROMOTE: tuple[tuple[str, str], ...] = (
     ("layout_str", "layout"),
     ("orientation_str", "orientation"),
     ("floor_text", "floor"),
+    ("decoration_str", "decoration"),
+    ("building_type_str", "building_type"),
 )
 
 
