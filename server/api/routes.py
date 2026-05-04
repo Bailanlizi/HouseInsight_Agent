@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from server.agent.house_agent import build_pipeline_graph, run_chat_turn
+from server.agent.house_agent import build_pipeline_graph, pipeline_event, run_chat_turn
 from server.api.deps import get_paths, get_store
 from server.core.config import get_settings
 from server.core.paths import ProjectPaths
@@ -26,6 +26,12 @@ class ChatIn(BaseModel):
 
 class ChatOut(BaseModel):
     reply: str
+    sources: list[dict[str, str]] = Field(default_factory=list)
+
+
+class RunPipelineBody(BaseModel):
+    return_cleaned_file: bool = False
+    skip_full_report_export: bool = True
 
 
 @router.get("/health")
@@ -60,7 +66,16 @@ async def upload_files(
         content = await uf.read()
         dest.write_bytes(content)
         saved.append(name)
-    await store.emit(session_id, {"stage": "upload", "pct": 0, "msg": f"已保存 {len(saved)} 个文件"})
+    preview = ", ".join(saved[:6]) + ("…" if len(saved) > 6 else "")
+    pipeline_event(
+        store,
+        session_id,
+        "upload",
+        8,
+        f"已保存 {len(saved)} 个文件到 raw" + (f"（{preview}）" if preview else ""),
+        phase="upload.files",
+        step_id="upload.saved",
+    )
     return {"session_id": session_id, "saved": saved}
 
 
@@ -71,9 +86,19 @@ async def run_pipeline(
     store: SessionStore = Depends(get_store),
 ) -> dict[str, str]:
     try:
-        store.require(session_id)
+        st = store.require(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="session not found") from None
+
+    body = RunPipelineBody()
+    try:
+        raw = await request.body()
+        if raw.strip():
+            body = RunPipelineBody.model_validate_json(raw.decode("utf-8"))
+    except Exception:
+        body = RunPipelineBody()
+    st.return_cleaned_file = body.return_cleaned_file
+    st.skip_full_report_export = body.skip_full_report_export
 
     paths: ProjectPaths = request.app.state.paths
     settings = get_settings()
@@ -132,6 +157,45 @@ async def get_analysis(session_id: str, store: SessionStore = Depends(get_store)
     }
 
 
+@router.get("/sessions/{session_id}/run_result")
+async def get_run_result(session_id: str, store: SessionStore = Depends(get_store)) -> dict[str, object]:
+    """聚合首屏：分析摘要、图表键、产物键、质检与进度时间线尾部。"""
+    try:
+        st = store.require(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session not found") from None
+    fig_keys = list(st.figures.keys())
+    total_chars = sum(len(v) for v in st.figures.values())
+    qr = st.quality_report
+    quality_brief: dict[str, object] = {}
+    if isinstance(qr, dict):
+        quality_brief = {
+            "passed": qr.get("passed"),
+            "failures": qr.get("failures"),
+            "metrics": qr.get("metrics"),
+        }
+    return {
+        "session_id": session_id,
+        "stage": st.stage,
+        "progress_pct": st.progress_pct,
+        "last_message": st.last_message,
+        "error": st.error,
+        "analysis": st.analysis,
+        "analysis_summary_markdown": st.analysis_summary_markdown,
+        "figures_keys": fig_keys,
+        "figures_payload_chars": total_chars,
+        "figures_too_large_for_inline": total_chars > 500_000,
+        "artifacts": st.artifacts,
+        "quality_report": st.quality_report,
+        "quality_brief": quality_brief,
+        "progress_events": st.progress_events[-120:],
+        "options": {
+            "return_cleaned_file": st.return_cleaned_file,
+            "skip_full_report_export": st.skip_full_report_export,
+        },
+    }
+
+
 @router.get("/sessions/{session_id}/figures")
 async def get_figures(session_id: str, store: SessionStore = Depends(get_store)) -> dict[str, object]:
     try:
@@ -178,5 +242,5 @@ async def chat(session_id: str, body: ChatIn, store: SessionStore = Depends(get_
     settings = get_settings()
     if not settings.dashscope_api_key:
         raise HTTPException(status_code=400, detail="DASHSCOPE_API_KEY 未配置，无法对话")
-    reply = run_chat_turn(store, session_id, body.message, settings)
-    return ChatOut(reply=reply)
+    reply, sources = run_chat_turn(store, session_id, body.message, settings)
+    return ChatOut(reply=reply, sources=sources)

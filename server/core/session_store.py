@@ -36,6 +36,12 @@ class SessionState:
     analysis_plan_raw: str = ""
     analysis_summary_markdown: str = ""
     error: str | None = None
+    #: POST /run 请求体：是否在 output 中写入 cleaned.csv
+    return_cleaned_file: bool = False
+    #: 为 True 时不生成 report.html / report.pdf（仍默认可写 report.xlsx）
+    skip_full_report_export: bool = True
+    #: 流水线进度时间线（供可展开 UI），与 WS 负载字段对齐
+    progress_events: list[dict[str, Any]] = field(default_factory=list)
 
     def touch(self, stage: str, pct: int, msg: str) -> None:
         self.stage = stage

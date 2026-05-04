@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pandas as pd
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 
 from server.core.config import Settings, get_settings
 from server.core.paths import ProjectPaths
-from server.core.session_store import SessionStore
+from server.core.session_store import SessionState, SessionStore, utc_now_iso
 from server.tools.analysis import analyze_second_hand_listings
 from server.tools.analysis_narrative import enrich_analysis_markdown
 from server.tools.analysis_plan import plan_analysis_with_llm, run_planned_analysis
@@ -37,9 +37,83 @@ _CLEANING_BEHAVIOR_GUIDE = """\
 分析侧偏好：区域均价用横向条形更易读；户型对比均价；面积段统计 + 占比饼图。"""
 
 
-def _emit(store: SessionStore, session_id: str, stage: str, pct: int, msg: str) -> None:
-    store.require(session_id).touch(stage, pct, msg)
-    store.schedule_emit(session_id, {"stage": stage, "pct": pct, "msg": msg})
+_MAX_PROGRESS_EVENTS = 200
+
+
+def _emit(
+    store: SessionStore,
+    session_id: str,
+    stage: str,
+    pct: int,
+    msg: str,
+    *,
+    phase: str | None = None,
+    step_id: str | None = None,
+    event: str | None = None,
+) -> None:
+    st = store.require(session_id)
+    st.touch(stage, pct, msg)
+    payload: dict[str, object] = {"stage": stage, "pct": pct, "msg": msg, "ts": utc_now_iso()}
+    if phase is not None:
+        payload["phase"] = phase
+    if step_id is not None:
+        payload["step_id"] = step_id
+    if event is not None:
+        payload["event"] = event
+    st.progress_events.append(dict(payload))
+    if len(st.progress_events) > _MAX_PROGRESS_EVENTS:
+        del st.progress_events[: len(st.progress_events) - _MAX_PROGRESS_EVENTS]
+    store.schedule_emit(session_id, payload)
+
+
+def pipeline_event(
+    store: SessionStore,
+    session_id: str,
+    stage: str,
+    pct: int,
+    msg: str,
+    *,
+    phase: str | None = None,
+    step_id: str | None = None,
+    event: str | None = None,
+) -> None:
+    """供 API 层（如上传完成）写入与流水线一致的进度事件。"""
+    _emit(store, session_id, stage, pct, msg, phase=phase, step_id=step_id, event=event)
+
+
+def _chat_columns_mentioned_in_question(user_text: str, columns: list[str]) -> list[str]:
+    out: list[str] = []
+    for c in columns:
+        if c and c in user_text:
+            out.append(c)
+    return out[:16]
+
+
+def _build_chat_provenance(
+    st: SessionState, user_text: str
+) -> tuple[str, list[dict[str, str]]]:
+    n = len(st.df_clean) if st.df_clean is not None else 0
+    cols = list(st.df_clean.columns) if st.df_clean is not None else []
+    hinted = _chat_columns_mentioned_in_question(user_text, cols)
+    col_preview = ", ".join(cols[:12]) + ("…" if len(cols) > 12 else "")
+    footer_lines = [
+        "",
+        "---",
+        "【数据来源】",
+        f"· 会话清洗表 df_clean：约 {n} 行，{len(cols)} 列（列名示例：{col_preview or '无'}）。",
+        "· 统计与图表：基于本会话流水线生成的 analysis / figures，非实时重算全表。",
+        "· 未对原始上传文件做逐行人工核对；若问题超出摘要范围，结论可能不完整。",
+    ]
+    if hinted:
+        footer_lines.append(f"· 本问与列名显式相关：{', '.join(hinted)}。")
+    footer = "\n".join(footer_lines)
+    sources: list[dict[str, str]] = [
+        {"label": "df_clean", "detail": f"{n} 行 × {len(cols)} 列"},
+        {"label": "analysis", "detail": "会话内结构化分析结果"},
+    ]
+    if hinted:
+        sources.append({"label": "提及列", "detail": ", ".join(hinted)})
+    return footer, sources
 
 
 def _build_llm(settings: Settings):
@@ -53,12 +127,21 @@ def _build_llm(settings: Settings):
     )
 
 
-def run_chat_turn(store: SessionStore, session_id: str, user_text: str, settings: Settings | None = None) -> str:
+def run_chat_turn(
+    store: SessionStore, session_id: str, user_text: str, settings: Settings | None = None
+) -> tuple[str, list[dict[str, str]]]:
     settings = settings or get_settings()
     st = store.require(session_id)
     llm = _build_llm(settings)
     history = st.chat_messages[-12:]
-    msgs = []
+    msgs: list[Any] = [
+        SystemMessage(
+            content=(
+                "你是二手房数据分析助手。只能基于对话中给出的【数据集摘要】与已知的 analysis 结论作答；"
+                "禁止编造表中不存在的列名、行号或具体房源；信息不足时请直接说明。"
+            )
+        ),
+    ]
     for m in history:
         role = m.get("role", "user")
         content = m.get("content", "")
@@ -68,24 +151,31 @@ def run_chat_turn(store: SessionStore, session_id: str, user_text: str, settings
             msgs.append(AIMessage(content=content))
     summary = ""
     if st.df_clean is not None:
-        summary = f"\n\n[数据集摘要] 行数={len(st.df_clean)}, 列={list(st.df_clean.columns)}"
+        aq = st.analysis.get("unit_price_quantiles") if isinstance(st.analysis, dict) else None
+        extra = f"；单价分位数摘要: {aq}" if aq else ""
+        summary = (
+            f"\n\n[数据集摘要] 行数={len(st.df_clean)}, 列={list(st.df_clean.columns)}{extra}"
+        )
     msgs.append(HumanMessage(content=user_text + summary))
     ai = llm.invoke(msgs)
     text = getattr(ai, "content", str(ai))
+    footer, sources = _build_chat_provenance(st, user_text)
+    full_reply = text + footer
     st.chat_messages.append({"role": "user", "content": user_text})
-    st.chat_messages.append({"role": "assistant", "content": text})
-    return text
+    st.chat_messages.append({"role": "assistant", "content": full_reply})
+    return full_reply, sources
 
 
 def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Settings):
     def node_ingest(state: PipelineState) -> PipelineState:
         sid = state["session_id"]
         try:
-            _emit(store, sid, "ingest", 10, "读取并合并原始表格…")
+            _emit(store, sid, "ingest", 10, "读取并合并原始表格…", phase="ingest.read", step_id="ingest_start")
             raw_dir = paths.raw_dir(sid)
             df, ingest_warnings = load_raw_directory(raw_dir)
             df = canonicalize_known_aliases(df)
             st = store.require(sid)
+            st.progress_events.clear()
             st.df_raw = df
             st.df_clean = df.copy()
             st.clean_attempt_count = 0
@@ -100,7 +190,7 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
                 skipped_names = [w.split(":", 1)[0].strip() for w in ingest_warnings if ":" in w]
                 if skipped_names and all(n.startswith("._") for n in skipped_names):
                     msg += "（提示：未读文件多为 ._ 附属占位；真实表通常为同名无前缀文件。）"
-            _emit(store, sid, "ingest", 25, msg)
+            _emit(store, sid, "ingest", 25, msg, phase="ingest.merge", step_id="ingest_done")
             return {"session_id": sid, "error": None}
         except Exception as e:
             err_text = str(e)
@@ -141,6 +231,8 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             "clean",
             36,
             f"智能清洗（第 {st.clean_attempt_count}/{settings.houseinsight_max_clean_attempts} 轮）…",
+            phase="clean.start",
+            step_id="clean_round",
         )
         tools = build_cleaning_tools_for_session(store, sid)
 
@@ -160,6 +252,15 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             user_content = base_user
 
         if settings.dashscope_api_key:
+            _emit(
+                store,
+                sid,
+                "clean",
+                38,
+                "调用 LLM 与领域工具进行缺失值/拆分等处理…",
+                phase="clean.llm_agent",
+                step_id="clean_llm",
+            )
             try:
                 llm = _build_llm(settings)
                 agent = create_agent(
@@ -189,6 +290,15 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
                 note = getattr(last, "content", str(last)) if last else ""
                 st.cleaning_notes = (st.cleaning_notes + "\n" + str(note)).strip()
             except Exception as e:
+                _emit(
+                    store,
+                    sid,
+                    "clean",
+                    40,
+                    "LLM 清洗异常，切换默认规则（去重、数值化、IQR 等）…",
+                    phase="clean.fallback_rules",
+                    step_id="clean_default",
+                )
                 st.df_clean, note = apply_default_cleaning_pipeline(st.df_raw.copy())
                 fallback_head = (
                     "【清洗说明】智能体在某次工具调用中出错，已自动改用默认规则并完成数值解析加固；"
@@ -198,12 +308,30 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
                 st.cleaning_notes = (st.cleaning_notes + "\n\n" + fallback_head + "\n\n" + note).strip()
                 st.cleaning_trace.append("apply_default_cleaning_pipeline(fallback_after_llm_error)")
         else:
+            _emit(
+                store,
+                sid,
+                "clean",
+                38,
+                "无 API Key：使用默认规则（数值化、单价推算、去重、IQR）…",
+                phase="clean.default_rules",
+                step_id="clean_default",
+            )
             st.df_clean, note = apply_default_cleaning_pipeline(st.df_raw.copy())
             st.cleaning_notes = note
             st.cleaning_trace.append("apply_default_cleaning_pipeline(no_api_key)")
 
+        _emit(
+            store,
+            sid,
+            "clean",
+            50,
+            "解析「万/元/㎡」文本、过渡列合并、缺失单价填补…",
+            phase="clean.numeric_finalize",
+            step_id="finalize_listing",
+        )
         st.df_clean = finalize_listing_dataframe(st.df_clean)
-        _emit(store, sid, "clean", 52, f"第 {st.clean_attempt_count} 轮清洗完成（已文本数值加固）")
+        _emit(store, sid, "clean", 52, f"第 {st.clean_attempt_count} 轮清洗完成（已文本数值加固）", phase="clean.done")
         return {"session_id": sid, "error": None}
 
     def node_quality_gate(state: PipelineState) -> PipelineState:
@@ -211,7 +339,7 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         if state.get("error"):
             return state
         st = store.require(sid)
-        _emit(store, sid, "quality", 56, "数据质检（守门）…")
+        _emit(store, sid, "quality", 56, "数据质检（守门）…", phase="quality.rules", step_id="quality_start")
         report = assess_clean_quality(st.df_raw, st.df_clean, settings)
         st.quality_report = report
         if report.get("passed"):
@@ -249,12 +377,20 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         base = base if base is not None else pd.DataFrame()
         base = finalize_listing_dataframe(base)
 
-        _emit(store, sid, "analyze", 62, "生成分析计划…")
+        _emit(store, sid, "analyze", 62, "生成分析计划…", phase="analyze.plan", step_id="plan_llm")
         planned_tasks, raw_plan = plan_analysis_with_llm(base, settings)
         st.analysis_plan = [t.model_dump(mode="json") for t in planned_tasks]
         st.analysis_plan_raw = raw_plan or json.dumps(st.analysis_plan, ensure_ascii=False)
 
-        _emit(store, sid, "analyze", 68, f"执行分析任务（{len(planned_tasks)} 项）…")
+        _emit(
+            store,
+            sid,
+            "analyze",
+            68,
+            f"执行分析任务（{len(planned_tasks)} 项）…",
+            phase="analyze.execute",
+            step_id="execute_tasks",
+        )
         legacy = analyze_second_hand_listings(base)
         planned_out = run_planned_analysis(base, planned_tasks)
         st.analysis = {**legacy, **planned_out}
@@ -276,9 +412,9 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         st = store.require(sid)
         df = st.df_clean if st.df_clean is not None else pd.DataFrame()
         df = finalize_listing_dataframe(df) if not df.empty else df
-        _emit(store, sid, "viz", 80, "生成交互图表…")
+        _emit(store, sid, "viz", 80, "生成交互图表…", phase="viz.build", step_id="plotly")
         st.figures = figures_from_analysis(df, st.analysis)
-        _emit(store, sid, "viz", 88, "图表完成")
+        _emit(store, sid, "viz", 88, "图表完成", phase="viz.done")
         return {"session_id": sid, "error": None}
 
     def node_export(state: PipelineState) -> PipelineState:
@@ -287,21 +423,50 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             return state
         st = store.require(sid)
         df = st.df_clean if st.df_clean is not None else st.df_raw
-        _emit(store, sid, "export", 90, "导出报告…")
+        out_dir = paths.output_dir(sid)
+        out_dir.mkdir(parents=True, exist_ok=True)
         summary_md = st.analysis_summary_markdown or st.analysis.get("analysis_summary_markdown") or ""
-        html_path = render_report_html(
-            paths, sid, st.analysis, st.figures, st.cleaning_notes, narrative=summary_md
-        )
-        xlsx_path = write_excel_report(paths.output_dir(sid), df, st.analysis)
-        st.artifacts["report.html"] = str(html_path)
+
+        _emit(store, sid, "export", 90, "写出轻量 Excel 样本…", phase="export.xlsx", step_id="report_xlsx")
+        xlsx_path = write_excel_report(out_dir, df if df is not None else pd.DataFrame(), st.analysis)
         st.artifacts["report.xlsx"] = str(xlsx_path)
-        pdf_path = paths.output_dir(sid) / "report.pdf"
-        pdf = maybe_render_pdf(html_path, pdf_path)
-        if pdf:
-            st.artifacts["report.pdf"] = str(pdf)
+
+        if not st.skip_full_report_export:
+            _emit(store, sid, "export", 93, "生成 HTML 报告…", phase="export.html", step_id="report_html")
+            html_path = render_report_html(
+                paths, sid, st.analysis, st.figures, st.cleaning_notes, narrative=summary_md
+            )
+            st.artifacts["report.html"] = str(html_path)
+            pdf_path = out_dir / "report.pdf"
+            pdf = maybe_render_pdf(html_path, pdf_path)
+            if pdf:
+                st.artifacts["report.pdf"] = str(pdf)
+            else:
+                st.artifacts.pop("report.pdf", None)
+        else:
+            st.artifacts.pop("report.html", None)
+            st.artifacts.pop("report.pdf", None)
+
+        if st.return_cleaned_file and df is not None and not df.empty:
+            _emit(store, sid, "export", 96, "写出清洗结果 CSV…", phase="export.cleaned_csv", step_id="cleaned_csv")
+            clean_path = out_dir / "cleaned.csv"
+            df.to_csv(clean_path, index=False, encoding="utf-8-sig")
+            st.artifacts["cleaned.csv"] = str(clean_path)
+        else:
+            st.artifacts.pop("cleaned.csv", None)
+
         st.stage = "done"
         st.progress_pct = 100
-        _emit(store, sid, "done", 100, "全部完成")
+        _emit(
+            store,
+            sid,
+            "done",
+            100,
+            "流水线完成（分析结果已就绪，可与 Agent 对话）",
+            phase="pipeline.done",
+            step_id="run_complete",
+            event="run_complete",
+        )
         return {"session_id": sid, "error": None}
 
     g = StateGraph(PipelineState)

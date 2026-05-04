@@ -2,7 +2,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiUrl, wsUrl } from "./api";
 
-type WsMsg = { stage?: string; pct?: number; msg?: string };
+type ProgressEvt = {
+  stage?: string;
+  pct?: number;
+  msg?: string;
+  ts?: string;
+  phase?: string;
+  step_id?: string;
+  event?: string;
+};
+
+type RunResult = {
+  stage?: string;
+  progress_pct?: number;
+  last_message?: string;
+  analysis?: unknown;
+  analysis_summary_markdown?: string;
+  figures_keys?: string[];
+  figures_too_large_for_inline?: boolean;
+  artifacts?: Record<string, string>;
+  progress_events?: ProgressEvt[];
+};
 
 const api = (path: string, init?: RequestInit) => fetch(apiUrl(path), init);
 
@@ -12,33 +32,50 @@ export default function App() {
   const [status, setStatus] = useState<string>("");
   const [figures, setFigures] = useState<Record<string, string>>({});
   const [analysisText, setAnalysisText] = useState<string>("");
+  const [summaryMd, setSummaryMd] = useState<string>("");
+  const [artifactNames, setArtifactNames] = useState<string[]>([]);
+  const [progressEvents, setProgressEvents] = useState<ProgressEvt[]>([]);
+  const [returnCleanedFile, setReturnCleanedFile] = useState(false);
   const [chatIn, setChatIn] = useState("");
   const [chatOut, setChatOut] = useState<string>("");
+  const [chatSources, setChatSources] = useState<{ label: string; detail: string }[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
 
   const appendLog = useCallback((line: string) => {
     setLog((s) => (s ? `${s}\n${line}` : line));
   }, []);
 
-  const refreshArtifacts = useCallback(async (sid: string) => {
-    const [fa, ff] = await Promise.all([
-      api(`/api/v1/sessions/${sid}/analysis`),
-      api(`/api/v1/sessions/${sid}/figures`),
-    ]);
-    if (fa.ok) {
-      const j = (await fa.json()) as { analysis?: unknown };
+  const refreshRunResult = useCallback(
+    async (sid: string) => {
+      const rr = await api(`/api/v1/sessions/${sid}/run_result`);
+      if (!rr.ok) {
+        appendLog(`run_result HTTP ${rr.status}`);
+        return;
+      }
+      const j = (await rr.json()) as RunResult;
       setAnalysisText(JSON.stringify(j.analysis ?? {}, null, 2));
-    }
-    if (ff.ok) {
-      const j = (await ff.json()) as { figures?: Record<string, string> };
-      setFigures(j.figures ?? {});
-    }
-    const st = await api(`/api/v1/sessions/${sid}/status`);
-    if (st.ok) {
-      const j = (await st.json()) as { stage?: string; progress_pct?: number; last_message?: string };
+      setSummaryMd(j.analysis_summary_markdown ?? "");
+      setArtifactNames(Object.keys(j.artifacts ?? {}));
+      if (Array.isArray(j.progress_events) && j.progress_events.length) {
+        setProgressEvents(j.progress_events);
+      }
       setStatus(`${j.stage ?? "?"} (${j.progress_pct ?? 0}%) — ${j.last_message ?? ""}`);
-    }
-  }, []);
+
+      if (j.figures_too_large_for_inline) {
+        appendLog(
+          `图表 HTML 合计约 ${(j as { figures_payload_chars?: number }).figures_payload_chars ?? "?"} 字符，前端跳过内联加载；可单独请求 GET .../figures。`,
+        );
+        setFigures({});
+      } else {
+        const ff = await api(`/api/v1/sessions/${sid}/figures`);
+        if (ff.ok) {
+          const fj = (await ff.json()) as { figures?: Record<string, string> };
+          setFigures(fj.figures ?? {});
+        }
+      }
+    },
+    [appendLog],
+  );
 
   const connectWs = useCallback(
     (sid: string) => {
@@ -54,17 +91,21 @@ export default function App() {
       ws.onclose = (ev) => appendLog(`WebSocket 关闭 code=${ev.code}`);
       ws.onmessage = (ev) => {
         try {
-          const data = JSON.parse(ev.data as string) as WsMsg;
+          const data = JSON.parse(ev.data as string) as ProgressEvt;
           if (data.stage === "ping") return;
           appendLog(`[${data.stage ?? "?"} ${data.pct ?? "-"}%] ${data.msg ?? ""}`);
-          if (data.stage === "done") void refreshArtifacts(sid);
+          setProgressEvents((prev) => {
+            const next = [...prev, data];
+            return next.length > 200 ? next.slice(-200) : next;
+          });
+          if (data.event === "run_complete" || data.stage === "done") void refreshRunResult(sid);
         } catch {
           appendLog(String(ev.data));
         }
       };
       ws.onerror = () => appendLog("WebSocket error（请确认后端已启动在 8000 端口，且未被防火墙拦截）");
     },
-    [appendLog, refreshArtifacts]
+    [appendLog, refreshRunResult],
   );
 
   useEffect(() => {
@@ -94,6 +135,8 @@ export default function App() {
         return;
       }
       setSessionId(sid);
+      setProgressEvents([]);
+      setArtifactNames([]);
       appendLog(`会话已创建: ${sid}`);
       connectWs(sid);
     } catch (e) {
@@ -126,7 +169,14 @@ export default function App() {
     if (!sessionId) return;
     appendLog("启动流水线…");
     try {
-      const r = await api(`/api/v1/sessions/${sessionId}/run`, { method: "POST" });
+      const r = await api(`/api/v1/sessions/${sessionId}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          return_cleaned_file: returnCleanedFile,
+          skip_full_report_export: true,
+        }),
+      });
       const t = await r.text();
       if (!r.ok) appendLog(`启动失败 HTTP ${r.status}: ${t.slice(0, 400)}`);
     } catch (e) {
@@ -144,16 +194,21 @@ export default function App() {
     if (!r.ok) {
       const t = await r.text();
       setChatOut(`错误: ${t}`);
+      setChatSources([]);
       return;
     }
-    const j = (await r.json()) as { reply?: string };
+    const j = (await r.json()) as { reply?: string; sources?: { label: string; detail: string }[] };
     setChatOut(j.reply ?? "");
+    setChatSources(j.sources ?? []);
     setChatIn("");
   };
 
   const figEntries = useMemo(() => Object.entries(figures), [figures]);
 
-  const reportUrl = sessionId ? apiUrl(`/api/v1/sessions/${sessionId}/artifacts/download?name=report.html`) : "";
+  const reportUrl =
+    sessionId && artifactNames.includes("report.html")
+      ? apiUrl(`/api/v1/sessions/${sessionId}/artifacts/download?name=report.html`)
+      : "";
 
   const uploadDisabled = !sessionId;
 
@@ -182,10 +237,20 @@ export default function App() {
         ) : null}
         <input type="file" multiple accept=".csv,.xlsx,.xls" onChange={(e) => void onUpload(e)} disabled={uploadDisabled} />
         <div className="row" style={{ marginTop: 12 }}>
+          <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={returnCleanedFile}
+              onChange={(e) => setReturnCleanedFile(e.target.checked)}
+            />
+            运行结束后写出并登记 <code>cleaned.csv</code>（可下载）
+          </label>
+        </div>
+        <div className="row" style={{ marginTop: 12 }}>
           <button className="primary" type="button" onClick={() => void runPipeline()} disabled={!sessionId}>
             运行分析流水线
           </button>
-          <button type="button" onClick={() => sessionId && void refreshArtifacts(sessionId)} disabled={!sessionId}>
+          <button type="button" onClick={() => sessionId && void refreshRunResult(sessionId)} disabled={!sessionId}>
             刷新状态与图表
           </button>
           {reportUrl ? (
@@ -196,14 +261,49 @@ export default function App() {
         </div>
         <p className="muted">
           <strong>刷新状态与图表</strong>
-          ：不向服务器重新跑流水线，只是再拉取当前会话的「阶段/进度文案」「分析 JSON」「Plotly 图表 HTML」。适用于 WebSocket
-          漏了进度、你晚开了页面、或跑完后想手动对齐界面与服务端状态。
+          ：拉取 <code>run_result</code> 聚合接口与图表；适用于 WebSocket 漏消息或跑完后对齐界面。默认不生成 HTML 报告（仅 Excel
+          等轻量产物），有 <code>report.html</code> 时才会显示「打开 HTML 报告」链接。
         </p>
         <p className="muted">{status}</p>
+        {artifactNames.length > 0 ? (
+          <div className="row" style={{ marginTop: 8 }}>
+            <span className="muted">下载产物：</span>
+            {artifactNames.map((name) => (
+              <a
+                key={name}
+                href={apiUrl(`/api/v1/sessions/${sessionId}/artifacts/download?name=${encodeURIComponent(name)}`)}
+              >
+                {name}
+              </a>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <div className="card">
-        <h3>进度（WebSocket）</h3>
+        <h3>进度</h3>
+        <details>
+          <summary>
+            展开时间线（{progressEvents.length} 条）— WebSocket 实时追加；完成后与 <code>run_result</code> 对齐
+          </summary>
+          <ol className="progress-list">
+            {progressEvents.map((ev, i) => (
+              <li key={`${ev.ts ?? ""}-${i}`}>
+                <span className="muted">{ev.ts ?? ""}</span>{" "}
+                <strong>{ev.stage ?? "?"}</strong> {ev.pct ?? "-"}% — {ev.msg ?? ""}
+                {ev.phase ? (
+                  <span className="muted">
+                    {" "}
+                    <code>{ev.phase}</code>
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </details>
+        <p className="muted" style={{ marginTop: 8 }}>
+          原始日志
+        </p>
         <pre className="log">{log || "（暂无）"}</pre>
       </div>
 
@@ -216,6 +316,15 @@ export default function App() {
             <div dangerouslySetInnerHTML={{ __html: html }} />
           </div>
         ))}
+      </div>
+
+      <div className="card">
+        <h3>分析叙述（Markdown）</h3>
+        {summaryMd ? (
+          <pre className="log log-tall">{summaryMd}</pre>
+        ) : (
+          <p className="muted">（暂无，跑完流水线后由 run_result 填充）</p>
+        )}
       </div>
 
       <div className="card">
@@ -234,6 +343,18 @@ export default function App() {
         <pre className="log" style={{ marginTop: 12 }}>
           {chatOut || "（暂无回复）"}
         </pre>
+        {chatSources.length > 0 ? (
+          <div className="sources-muted">
+            <div>数据来源（结构化）</div>
+            <ul>
+              {chatSources.map((s) => (
+                <li key={s.label}>
+                  <strong>{s.label}</strong>：{s.detail}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </div>
     </div>
   );

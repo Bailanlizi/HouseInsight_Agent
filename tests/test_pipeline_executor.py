@@ -36,6 +36,7 @@ def test_pipeline_end_to_end_without_llm(tmp_path: Path) -> None:
     store = SessionStore()
     st = store.create_session()
     sid = st.session_id
+    st.skip_full_report_export = False  # 测试需 HTML 产物；API 默认 True 会跳过
     # 把文件写到期望 raw 目录（模拟上传）
     dest_raw = paths.raw_dir(sid)
     pd.read_csv(raw / "a.csv", encoding="utf-8-sig").to_csv(dest_raw / "a.csv", index=False, encoding="utf-8-sig")
@@ -48,6 +49,45 @@ def test_pipeline_end_to_end_without_llm(tmp_path: Path) -> None:
     assert st2.stage == "done"
     assert "report.html" in st2.artifacts
     assert Path(st2.artifacts["report.html"]).exists()
+
+
+def test_cleaned_csv_when_flag_enabled(tmp_path: Path) -> None:
+    root = tmp_path
+    tpl_dir = root / "templates"
+    tpl_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(REPO_ROOT / "templates" / "report_template.html", tpl_dir / "report_template.html")
+    raw = root / "data" / "raw" / "s1"
+    raw.mkdir(parents=True)
+    df = pd.DataFrame(
+        {
+            "district": ["海淀区", "海淀区"],
+            "community": ["X", "X"],
+            "layout": ["2室1厅", "2室1厅"],
+            "area_m2": [90.0, 90.0],
+            "total_price": [650.0, 650.0],
+            "unit_price": [72000.0, 72000.0],
+        }
+    )
+    df.to_csv(raw / "b.csv", index=False, encoding="utf-8-sig")
+
+    paths = ProjectPaths(root)
+    store = SessionStore()
+    st = store.create_session()
+    sid = st.session_id
+    st.return_cleaned_file = True
+    st.skip_full_report_export = True
+    dest_raw = paths.raw_dir(sid)
+    pd.read_csv(raw / "b.csv", encoding="utf-8-sig").to_csv(dest_raw / "b.csv", index=False, encoding="utf-8-sig")
+
+    settings = Settings(dashscope_api_key="")
+    g = build_pipeline_graph(store, paths, settings)
+    g.invoke({"session_id": sid})
+
+    st2 = store.require(sid)
+    assert st2.stage == "done"
+    assert "cleaned.csv" in st2.artifacts
+    assert Path(st2.artifacts["cleaned.csv"]).exists()
+    assert "report.html" not in st2.artifacts
 
 
 def test_main_app_import() -> None:

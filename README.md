@@ -35,7 +35,7 @@
        → quality_gate（规则质检；未通过且未达最大轮次 → 重置 raw 再 clean）
        → analyze（任务规划 + run_planned_analysis + legacy 指标 + 可选分析师叙述）
        → viz（按 task_results 出图）
-       → export（report.html / report.xlsx / 可选 PDF）
+       → export（默认可写 report.xlsx；`skip_full_report_export=true` 时跳过 HTML/PDF；可选写 cleaned.csv）
 ```
 
 ---
@@ -103,14 +103,15 @@ npm run dev
 ## API 摘要
 
 - `POST /sessions` — 创建会话  
-- `POST /sessions/{id}/upload` — 上传原始表格到会话 `raw` 目录  
-- `POST /sessions/{id}/run` — 异步执行整条流水线  
+- `POST /sessions/{id}/upload` — 上传原始表格到会话 `raw` 目录；进度事件写入会话时间线并经 WS 推送（与流水线 `_emit` 字段一致）  
+- `POST /sessions/{id}/run` — 异步执行整条流水线；**JSON 请求体（可选）**：`return_cleaned_file`（默认 `false`）是否在 `output` 写出 `cleaned.csv` 并登记到 `artifacts`；`skip_full_report_export`（默认 `true`）为 `true` 时不生成 `report.html` / `report.pdf`（仍会写 `report.xlsx`）  
 - `GET /sessions/{id}/status` — 阶段与进度  
+- `GET /sessions/{id}/run_result` — 首屏聚合：`analysis`、`analysis_summary_markdown`、`figures_keys`、`figures_payload_chars`、`figures_too_large_for_inline`、`artifacts`、`quality_report` / `quality_brief`、`progress_events` 尾部、`options` 回显  
 - `GET /sessions/{id}/analysis` — `analysis`、`analysis_plan`、`quality_report`、`cleaning_trace`、`clean_attempt_count` 等  
 - `GET /sessions/{id}/figures` — Plotly HTML 片段字典  
 - `GET /sessions/{id}/artifacts` / `.../download` — 报告与导出文件  
-- `POST /sessions/{id}/chat` — 多轮对话（需配置 API Key）  
-- WebSocket：订阅会话进度（见 `server/api/ws.py`）
+- `POST /sessions/{id}/chat` — 多轮对话（需配置 API Key）；响应体含 `reply` 与 `sources`（结构化数据来源说明；正文末尾另有中文脚注）  
+- WebSocket：订阅会话进度；负载除 `stage` / `pct` / `msg` 外可含 `ts`、`phase`、`step_id`、`event`（流水线完成时为 `event=run_complete`）
 
 ---
 
