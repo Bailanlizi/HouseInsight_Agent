@@ -562,9 +562,9 @@ export default function App() {
           </div>
         </section>
 
-        {/* Progress Card */}
+        {/* Progress Card — 外层与其它 .card 一致；内层浅粉边框为可点击进度区 */}
         {showProgress ? (
-          <section className="card-progress">
+          <section className="card">
             <div className="flex items-center gap-2 mb-4">
               <Clock size={18} strokeWidth={1.75} className="text-rose-500" />
               <h2 className="text-base font-semibold text-slate-800 tracking-tight">处理进度</h2>
@@ -574,7 +574,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setPipelineExpanded((v) => !v)}
-              className="w-full rounded-xl border border-transparent p-1 -m-1 text-left outline-none transition hover:border-rose-200/80 hover:bg-rose-50/50 focus-visible:ring-2 focus-visible:ring-rose-200 focus-visible:ring-offset-2 focus-visible:ring-offset-[#FFFBF5]"
+              className="w-full rounded-xl border border-rose-100 bg-white/70 px-3 py-3 text-left outline-none transition hover:bg-rose-50/60 hover:border-rose-200/90 focus-visible:ring-2 focus-visible:ring-rose-200 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
               aria-expanded={pipelineExpanded}
               aria-label={pipelineExpanded ? "收起流水线步骤" : "展开流水线步骤"}
             >
