@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiUrl, wsUrl } from "./api";
+import { PlotlyFigure } from "./PlotlyFigure";
 
 type ProgressEvt = {
   stage?: string;
@@ -18,6 +19,7 @@ type RunResult = {
   last_message?: string;
   analysis?: unknown;
   analysis_summary_markdown?: string;
+  analysis_summary_plain?: string;
   figures_keys?: string[];
   figures_too_large_for_inline?: boolean;
   artifacts?: Record<string, string>;
@@ -31,8 +33,7 @@ export default function App() {
   const [log, setLog] = useState<string>("");
   const [status, setStatus] = useState<string>("");
   const [figures, setFigures] = useState<Record<string, string>>({});
-  const [analysisText, setAnalysisText] = useState<string>("");
-  const [summaryMd, setSummaryMd] = useState<string>("");
+  const [analysisSummaryPlain, setAnalysisSummaryPlain] = useState<string>("");
   const [artifactNames, setArtifactNames] = useState<string[]>([]);
   const [progressEvents, setProgressEvents] = useState<ProgressEvt[]>([]);
   const [returnCleanedFile, setReturnCleanedFile] = useState(false);
@@ -53,8 +54,7 @@ export default function App() {
         return;
       }
       const j = (await rr.json()) as RunResult;
-      setAnalysisText(JSON.stringify(j.analysis ?? {}, null, 2));
-      setSummaryMd(j.analysis_summary_markdown ?? "");
+      setAnalysisSummaryPlain(j.analysis_summary_plain ?? "");
       setArtifactNames(Object.keys(j.artifacts ?? {}));
       if (Array.isArray(j.progress_events) && j.progress_events.length) {
         setProgressEvents(j.progress_events);
@@ -137,6 +137,7 @@ export default function App() {
       setSessionId(sid);
       setProgressEvents([]);
       setArtifactNames([]);
+      setAnalysisSummaryPlain("");
       appendLog(`会话已创建: ${sid}`);
       connectWs(sid);
     } catch (e) {
@@ -310,26 +311,24 @@ export default function App() {
       <div className="card">
         <h3>交互图表（Plotly HTML）</h3>
         {figEntries.length === 0 ? <p className="muted">运行完成后会自动刷新；也可手动点「刷新状态与图表」。</p> : null}
-        {figEntries.map(([name, html]) => (
+        {figEntries.map(([name]) => (
           <div key={name} className="figure">
             <div className="muted">{name}</div>
-            <div dangerouslySetInnerHTML={{ __html: html }} />
+            <PlotlyFigure sessionId={sessionId} figureName={name} title={name} />
           </div>
         ))}
       </div>
 
       <div className="card">
-        <h3>分析叙述（Markdown）</h3>
-        {summaryMd ? (
-          <pre className="log log-tall">{summaryMd}</pre>
+        <h3>分析总结</h3>
+        <p className="muted" style={{ marginBottom: 8 }}>
+          约 300～500 字纯文本结论（数据概览、价格、供应与关键发现）；跑完流水线后由 <code>run_result</code> 填充。
+        </p>
+        {analysisSummaryPlain ? (
+          <pre className="log log-tall log-plain">{analysisSummaryPlain}</pre>
         ) : (
-          <p className="muted">（暂无，跑完流水线后由 run_result 填充）</p>
+          <p className="muted">（暂无）</p>
         )}
-      </div>
-
-      <div className="card">
-        <h3>分析摘要（JSON）</h3>
-        <pre className="log">{analysisText || "（暂无）"}</pre>
       </div>
 
       <div className="card">

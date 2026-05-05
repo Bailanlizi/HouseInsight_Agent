@@ -16,6 +16,33 @@ from server.core.config import Settings
 from server.tools.dataset_profile import build_dataset_profile
 
 
+def _trim_profile_columns(profile: dict[str, Any], max_cols: int) -> dict[str, Any]:
+    cols = profile.get("columns")
+    if not isinstance(cols, list) or len(cols) <= max_cols:
+        return profile
+
+    def _pipe_score(c: Any) -> float:
+        if not isinstance(c, dict):
+            return 0.0
+        return float(c.get("pipe_like_ratio") or 0.0)
+
+    ranked = sorted(cols, key=_pipe_score, reverse=True)
+    out = dict(profile)
+    out["columns"] = ranked[:max_cols]
+    out["profile_truncated"] = True
+    out["profile_total_columns"] = len(cols)
+    return out
+
+
+def compact_plan_payload(df: pd.DataFrame, profile: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    prof = _trim_profile_columns(profile, settings.houseinsight_plan_profile_max_cols)
+    return {
+        "profile": prof,
+        "columns": list(df.columns),
+        "row_count": int(len(df)),
+    }
+
+
 class AnalysisTaskType(str, Enum):
     district_price_rank = "district_price_rank"
     layout_price_box = "layout_price_box"
@@ -315,11 +342,7 @@ def plan_analysis_with_llm(df: pd.DataFrame, settings: Settings) -> tuple[list[P
 
     plan_model = settings.houseinsight_plan_model or settings.houseinsight_llm_model
     profile = build_dataset_profile(df, sample_per_col=2)
-    payload = {
-        "profile": profile,
-        "columns": list(df.columns),
-        "row_count": len(df),
-    }
+    payload = compact_plan_payload(df, profile, settings)
     llm = ChatOpenAI(
         model=plan_model,
         api_key=settings.dashscope_api_key,

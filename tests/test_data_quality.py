@@ -29,7 +29,7 @@ def test_assess_passes_on_typical_clean_sample() -> None:
     assert r["metrics"]["clean_rows"] == 40
 
 
-def test_assess_fails_retention() -> None:
+def test_assess_fails_retention_critical() -> None:
     raw = pd.DataFrame({"x": range(200)})
     clean = pd.DataFrame(
         {
@@ -41,7 +41,40 @@ def test_assess_fails_retention() -> None:
     )
     r = assess_clean_quality(raw, clean, _settings())
     assert r["passed"] is False
-    assert "row_retention_low" in r["failures"]
+    assert "row_retention_critical" in r["failures"]
+
+
+def test_assess_passes_with_price_warning_only() -> None:
+    raw = pd.DataFrame({"x": range(40)})
+    clean = pd.DataFrame(
+        {
+            "district": ["a"] * 40,
+            "unit_price": [1.0] * 40,
+            "total_price": [400.0] * 40,
+            "area_m2": [80.0] * 40,
+        }
+    )
+    r = assess_clean_quality(raw, clean, _settings())
+    assert r["passed"] is True
+    codes = r.get("warning_codes") or []
+    assert "unit_price_sparse" in codes or "price_fields_weak" in codes
+
+
+def test_tag_near_subway_sparse_warning() -> None:
+    raw = pd.DataFrame({"x": range(40)})
+    clean = pd.DataFrame(
+        {
+            "district": ["a"] * 40,
+            "unit_price": [50000.0] * 40,
+            "total_price": [400.0] * 40,
+            "area_m2": [80.0] * 40,
+            "tag_near_subway": [False] * 40,
+        }
+    )
+    r = assess_clean_quality(raw, clean, _settings())
+    assert r["passed"] is True
+    assert "tag_near_subway_sparse" in (r.get("warning_codes") or [])
+    assert r["metrics"].get("tag_near_subway_true_ratio") == 0.0
 
 
 def test_assess_fails_when_clean_empty() -> None:

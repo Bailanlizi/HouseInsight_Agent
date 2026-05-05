@@ -105,7 +105,15 @@ _STAGING_PROMOTE: tuple[tuple[str, str], ...] = (
 )
 
 
+def _src_non_null_mask(ser: pd.Series) -> pd.Series:
+    if ser.dtype == object or pd.api.types.is_string_dtype(ser.dtype):
+        t = ser.astype(str).str.strip()
+        return ser.notna() & t.ne("") & ~t.str.lower().isin(["nan", "none", "null"])
+    return ser.notna()
+
+
 def promote_staging_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """将过渡列写入正式列；仅填补目标缺失且源非空，避免向 float64 写入全 NA 的 StringArray。"""
     out = df.copy()
     for src, tgt in _STAGING_PROMOTE:
         if src not in out.columns:
@@ -115,7 +123,20 @@ def promote_staging_columns(df: pd.DataFrame) -> pd.DataFrame:
             continue
         tcol = out[tgt]
         mask = tcol.isna() | (tcol.astype(str).str.strip() == "") | (tcol.astype(str).str.strip().str.lower() == "nan")
-        out.loc[mask, tgt] = out.loc[mask, src]
+        src_ok = _src_non_null_mask(out[src])
+        sub = mask & src_ok
+        if not sub.any():
+            continue
+        if tgt == "area_m2":
+            out.loc[sub, tgt] = pd.to_numeric(out.loc[sub, src].map(parse_area_m2), errors="coerce")
+        elif tgt == "unit_price":
+            out.loc[sub, tgt] = pd.to_numeric(out.loc[sub, src].map(parse_unit_price_yuan), errors="coerce")
+        elif tgt == "total_price":
+            out.loc[sub, tgt] = pd.to_numeric(out.loc[sub, src].map(parse_total_price_wan), errors="coerce")
+        elif tgt in ("build_year", "followers"):
+            out.loc[sub, tgt] = pd.to_numeric(out.loc[sub, src], errors="coerce")
+        else:
+            out.loc[sub, tgt] = out.loc[sub, src]
     return out
 
 
@@ -144,3 +165,39 @@ def finalize_listing_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     work = coerce_numeric_columns(work)
     work = fill_unit_price_from_total_and_area(work)
     return work
+
+
+# 与 _STAGING_PROMOTE 一致：规范列已存在时，导出可删过渡列以减冗余
+_STAGING_TO_CANONICAL: tuple[tuple[str, str], ...] = (
+    ("area_m2_str", "area_m2"),
+    ("area_m2_text", "area_m2"),
+    ("layout_str", "layout"),
+    ("orientation_str", "orientation"),
+    ("floor_text", "floor"),
+    ("decoration_str", "decoration"),
+    ("building_type_str", "building_type"),
+    ("followers_str", "followers"),
+    ("publish_time_raw", "listing_time"),
+)
+
+
+def slim_cleaned_export_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    生成写入 cleaned.csv 用的副本：去掉已与规范列重复的过渡列。
+    不修改会话中的 df_clean（分析/对话仍可用完整列）。
+    """
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    drop_cols: list[str] = []
+    for staging, canonical in _STAGING_TO_CANONICAL:
+        if staging in out.columns and canonical in out.columns:
+            drop_cols.append(staging)
+    if "layout" in out.columns and "layout_normalized" in out.columns:
+        drop_cols.append("layout")
+    seen: set[str] = set()
+    for c in drop_cols:
+        if c not in seen:
+            seen.add(c)
+            out = out.drop(columns=[c])
+    return out

@@ -35,6 +35,8 @@ class SessionState:
     analysis_plan: list[dict[str, Any]] = field(default_factory=list)
     analysis_plan_raw: str = ""
     analysis_summary_markdown: str = ""
+    #: 首屏用中文纯文本结论（约 300～500 字）
+    analysis_summary_plain: str = ""
     error: str | None = None
     #: POST /run 请求体：是否在 output 中写入 cleaned.csv
     return_cleaned_file: bool = False

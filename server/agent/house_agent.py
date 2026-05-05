@@ -14,9 +14,13 @@ from server.core.session_store import SessionState, SessionStore, utc_now_iso
 from server.tools.analysis import analyze_second_hand_listings
 from server.tools.analysis_narrative import enrich_analysis_markdown
 from server.tools.analysis_plan import plan_analysis_with_llm, run_planned_analysis
-from server.tools.cleaning import apply_default_cleaning_pipeline
+from server.pipeline.listing_etl import run_listing_etl
+from server.pipeline.rule_feature_engineering import apply_rule_text_features
+from server.tools.analysis_plain_summary import build_analysis_plain_summary
+from server.tools.cleaning_housing import derive_floor_band_column
+from server.tools.composite_field_parse import expand_composite_listing_columns
 from server.tools.data_quality import assess_clean_quality, coach_clean_retry_hints
-from server.tools.listing_numeric_parse import finalize_listing_dataframe
+from server.tools.listing_numeric_parse import finalize_listing_dataframe, slim_cleaned_export_dataframe
 from server.tools.export import maybe_render_pdf, render_report_html, write_excel_report
 from server.tools.io import canonicalize_known_aliases, iter_tabular_paths, load_raw_directory
 from server.tools.registry import build_cleaning_tools_for_session
@@ -38,6 +42,18 @@ _CLEANING_BEHAVIOR_GUIDE = """\
 
 
 _MAX_PROGRESS_EVENTS = 200
+
+
+def _prior_user_messages_for_intent(chat_messages: list[dict[str, Any]], *, max_segments: int = 8) -> list[str]:
+    """提取近期用户原话，供房源查询意图继承城区/户型等多轮约束。"""
+    out: list[str] = []
+    for m in chat_messages:
+        if m.get("role") != "user":
+            continue
+        t = (m.get("content") or "").strip()
+        if t:
+            out.append(t)
+    return out[-max_segments:]
 
 
 def _emit(
@@ -127,6 +143,59 @@ def _build_llm(settings: Settings):
     )
 
 
+def _build_llm_intent_parser(settings: Settings):
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=settings.houseinsight_llm_model,
+        api_key=settings.dashscope_api_key or None,
+        base_url=settings.dashscope_base_url,
+        temperature=0.0,
+    )
+
+
+def _aggregated_chat_context(st: SessionState) -> str:
+    """对话只附聚合信息，不塞入全量列名或宽表原文。"""
+    lines: list[str] = ["[会话聚合信息]"]
+    if st.df_clean is not None:
+        lines.append(f"清洗表行数约 {len(st.df_clean)}")
+    if (st.analysis_summary_plain or "").strip():
+        excerpt = st.analysis_summary_plain.strip()[:700]
+        lines.append("分析总结摘录：\n" + excerpt)
+    an = st.analysis if isinstance(st.analysis, dict) else {}
+    uq = an.get("unit_price_quantiles")
+    if uq:
+        lines.append(f"单价分位数：{json.dumps(uq, ensure_ascii=False)}")
+    ds = an.get("district_summary")
+    if isinstance(ds, list) and ds:
+        lines.append("城区摘要（前若干条）：" + json.dumps(ds[:8], ensure_ascii=False))
+    tr = an.get("task_results")
+    if isinstance(tr, dict) and tr:
+        ok_n = sum(1 for v in tr.values() if isinstance(v, dict) and v.get("ok"))
+        lines.append(f"规划分析任务成功数：{ok_n}/{len(tr)}")
+    if st.df_clean is not None:
+        keys = [
+            c
+            for c in (
+                "district",
+                "community",
+                "layout",
+                "layout_normalized",
+                "area_m2",
+                "unit_price",
+                "build_year",
+                "tag_near_subway",
+                "tag_subway_station_hint",
+                "description_hint_subway",
+                "description_hint_school",
+            )
+            if c in st.df_clean.columns
+        ]
+        if keys:
+            lines.append("关键列（仅列名，无逐行数据）：" + ", ".join(keys))
+    return "\n".join(lines)
+
+
 def run_chat_turn(
     store: SessionStore, session_id: str, user_text: str, settings: Settings | None = None
 ) -> tuple[str, list[dict[str, str]]]:
@@ -134,11 +203,63 @@ def run_chat_turn(
     st = store.require(session_id)
     llm = _build_llm(settings)
     history = st.chat_messages[-12:]
+    listing_block = ""
+    query_sources: list[dict[str, str]] = []
+    if settings.dashscope_api_key and st.df_clean is not None and len(st.df_clean) > 0:
+        try:
+            from server.tools.chat_listing_query import (
+                apply_listing_search_intent,
+                listings_to_llm_block,
+                parse_listing_search_intent,
+            )
+
+            intent_llm = _build_llm_intent_parser(settings)
+            prior_msgs = _prior_user_messages_for_intent(st.chat_messages)
+            intent = parse_listing_search_intent(
+                user_text,
+                intent_llm,
+                prior_user_messages=prior_msgs if prior_msgs else None,
+            )
+            if intent and intent.needs_row_samples:
+                sub, query_relax_note = apply_listing_search_intent(st.df_clean, intent)
+                n = len(sub)
+                if n == 0:
+                    note_prefix = f"\n\n{query_relax_note}" if query_relax_note else ""
+                    listing_block = (
+                        note_prefix
+                        + "\n\n[查询结果] 当前筛选条件下无匹配行。"
+                        "请用中文告知用户并建议放宽城区、小区名或价格条件。"
+                    )
+                    query_sources.append({"label": "listing_query", "detail": "0 条"})
+                else:
+                    relax_prefix = (
+                        f"\n\n[查询说明] {query_relax_note}\n" if query_relax_note else ""
+                    )
+                    listing_block = (
+                        relax_prefix
+                        + "\n\n[以下为会话 df_clean 经白名单规则筛选后的 JSON 样本；"
+                        "回答时仅可引用其中的字段与数值列出具体房源，勿编造未出现的列或行；"
+                        "请用简洁条目或短列表呈现，避免冗长 Markdown 大表。]\n"
+                        + listings_to_llm_block(sub)
+                    )
+                    query_sources.append(
+                        {"label": "listing_query", "detail": f"{n} 条（单次最多 {intent.max_rows}）"}
+                    )
+        except Exception:
+            pass
+
     msgs: list[Any] = [
         SystemMessage(
             content=(
-                "你是二手房数据分析助手。只能基于对话中给出的【数据集摘要】与已知的 analysis 结论作答；"
-                "禁止编造表中不存在的列名、行号或具体房源；信息不足时请直接说明。"
+                "你是二手房数据分析助手。只能基于对话中给出的【会话聚合信息】、已知的 analysis 结论、"
+                "以及（若有）【JSON 样本】作答。"
+                "若附有 JSON 数组，用户询问具体房源时应用其中的小区、价格、户型等字段逐条或概括回答；"
+                "禁止编造 JSON 中不存在的房源。"
+                "若有行级样本：回答务求简洁，优先短列表或要点，避免默认输出超长 Markdown 表格。"
+                "若无行级样本且用户问了具体房源：先用 2～4 条要点说明原因，再给一条可操作的放宽建议；"
+                "不要长篇铺陈。"
+                "若无行级样本而用户只要统计结论，则仅基于聚合信息。"
+                "信息不足时请直接说明。"
             )
         ),
     ]
@@ -149,17 +270,14 @@ def run_chat_turn(
             msgs.append(HumanMessage(content=content))
         elif role == "assistant":
             msgs.append(AIMessage(content=content))
-    summary = ""
-    if st.df_clean is not None:
-        aq = st.analysis.get("unit_price_quantiles") if isinstance(st.analysis, dict) else None
-        extra = f"；单价分位数摘要: {aq}" if aq else ""
-        summary = (
-            f"\n\n[数据集摘要] 行数={len(st.df_clean)}, 列={list(st.df_clean.columns)}{extra}"
-        )
-    msgs.append(HumanMessage(content=user_text + summary))
+    summary = "\n\n" + _aggregated_chat_context(st)
+    msgs.append(HumanMessage(content=user_text + summary + listing_block))
     ai = llm.invoke(msgs)
     text = getattr(ai, "content", str(ai))
     footer, sources = _build_chat_provenance(st, user_text)
+    if query_sources:
+        footer += "\n· 本问在可能时附带了经规则筛选的房源行级样本（见 listing_query）。"
+    sources = query_sources + sources
     full_reply = text + footer
     st.chat_messages.append({"role": "user", "content": user_text})
     st.chat_messages.append({"role": "assistant", "content": full_reply})
@@ -230,34 +348,36 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             sid,
             "clean",
             36,
-            f"智能清洗（第 {st.clean_attempt_count}/{settings.houseinsight_max_clean_attempts} 轮）…",
+            f"清洗（第 {st.clean_attempt_count}/{settings.houseinsight_max_clean_attempts} 轮）…",
             phase="clean.start",
             step_id="clean_round",
         )
-        tools = build_cleaning_tools_for_session(store, sid)
 
-        base_user = (
-            "请清洗当前会话中的二手房挂牌表（成都等 Excel 常见格式）：\n"
-            + _CLEANING_BEHAVIOR_GUIDE
-            + "\n执行：先 get_dataset_profile，再按需拆分/映射/数值化，保证 district、layout、area_m2、"
-            "total_price、unit_price 可用于统计。"
-        )
-        if st.clean_attempt_count > 1 and (st.quality_coach_hint or "").strip():
-            user_content = (
-                base_user
-                + "\n\n【上一轮质检反馈】请优先解决下列问题后再收尾：\n"
-                + st.quality_coach_hint.strip()
+        use_legacy = settings.houseinsight_legacy_agent_clean and bool(settings.dashscope_api_key)
+
+        if use_legacy:
+            tools = build_cleaning_tools_for_session(store, sid)
+            base_user = (
+                "请清洗当前会话中的二手房挂牌表（成都等 Excel 常见格式）：\n"
+                + _CLEANING_BEHAVIOR_GUIDE
+                + "\n执行：先 get_dataset_profile，再按需拆分/映射/数值化，保证 district、layout、area_m2、"
+                "total_price、unit_price 可用于统计。"
             )
-        else:
-            user_content = base_user
-
-        if settings.dashscope_api_key:
+            if st.clean_attempt_count > 1 and (st.quality_coach_hint or "").strip():
+                user_content = (
+                    base_user
+                    + "\n\n【上一轮质检反馈】请优先解决下列问题后再收尾：\n"
+                    + st.quality_coach_hint.strip()
+                )
+            else:
+                user_content = base_user
+            st.df_clean = st.df_raw.copy()
             _emit(
                 store,
                 sid,
                 "clean",
                 38,
-                "调用 LLM 与领域工具进行缺失值/拆分等处理…",
+                "旧版：LLM ReAct 清洗 Agent（仅对照/排障，生产请关 HOUSEINSIGHT_LEGACY_AGENT_CLEAN）…",
                 phase="clean.llm_agent",
                 step_id="clean_llm",
             )
@@ -278,60 +398,124 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
                         "完成后简短中文总结步骤。"
                     ),
                 )
-                result = agent.invoke(
-                    {
-                        "messages": [
-                            HumanMessage(content=user_content),
-                        ]
-                    }
-                )
+                result = agent.invoke({"messages": [HumanMessage(content=user_content)]})
                 msgs = result.get("messages", [])
                 last = msgs[-1] if msgs else None
                 note = getattr(last, "content", str(last)) if last else ""
                 st.cleaning_notes = (st.cleaning_notes + "\n" + str(note)).strip()
+                _emit(
+                    store,
+                    sid,
+                    "clean",
+                    46,
+                    "旧版路径：Agent 后对表做规则加固（复合列+finalize）…",
+                    phase="clean.legacy_finalize",
+                )
+                st.df_clean = expand_composite_listing_columns(st.df_clean)
+                st.df_clean = finalize_listing_dataframe(st.df_clean)
+                if "floor" in st.df_clean.columns:
+                    st.df_clean = derive_floor_band_column(st.df_clean, "floor")
+                st.cleaning_trace.append("legacy_agent_clean_then_finalize")
             except Exception as e:
                 _emit(
                     store,
                     sid,
                     "clean",
                     40,
-                    "LLM 清洗异常，切换默认规则（去重、数值化、IQR 等）…",
+                    "旧版 LLM 清洗异常，改为一键确定性 ETL…",
                     phase="clean.fallback_rules",
                     step_id="clean_default",
                 )
-                st.df_clean, note = apply_default_cleaning_pipeline(st.df_raw.copy())
+                st.df_clean, note = run_listing_etl(st.df_raw.copy())
                 fallback_head = (
-                    "【清洗说明】智能体在某次工具调用中出错，已自动改用默认规则并完成数值解析加固；"
-                    "下方数据仍可用于分析与图表。\n"
+                    "【清洗说明】旧版智能体出错，已改用确定性 ETL。\n"
                     f"（报错摘要）{e}"
                 )
                 st.cleaning_notes = (st.cleaning_notes + "\n\n" + fallback_head + "\n\n" + note).strip()
-                st.cleaning_trace.append("apply_default_cleaning_pipeline(fallback_after_llm_error)")
+                st.cleaning_trace.append("run_listing_etl(after_legacy_agent_error)")
         else:
             _emit(
                 store,
                 sid,
                 "clean",
                 38,
-                "无 API Key：使用默认规则（数值化、单价推算、去重、IQR）…",
-                phase="clean.default_rules",
-                step_id="clean_default",
+                "一键确定性 ETL（复合列规则 + 数值化 + 去重 + IQR + 楼层档），不经 LLM 改表…",
+                phase="clean.etl",
+                step_id="run_listing_etl",
             )
-            st.df_clean, note = apply_default_cleaning_pipeline(st.df_raw.copy())
-            st.cleaning_notes = note
-            st.cleaning_trace.append("apply_default_cleaning_pipeline(no_api_key)")
+            st.df_clean, note = run_listing_etl(st.df_raw.copy())
+            st.cleaning_notes = (
+                (st.cleaning_notes + "\n" + note).strip() if st.cleaning_notes else note
+            ).strip()
+            st.cleaning_trace.append("run_listing_etl")
 
+        _emit(store, sid, "clean", 52, f"第 {st.clean_attempt_count} 轮清洗完成", phase="clean.done")
+        return {"session_id": sid, "error": None}
+
+    def node_feature_engineering(state: PipelineState) -> PipelineState:
+        sid = state["session_id"]
+        if state.get("error"):
+            return state
+        st = store.require(sid)
+        if st.df_clean is None or st.df_clean.empty:
+            return {"session_id": sid, "error": None}
         _emit(
             store,
             sid,
             "clean",
             50,
-            "解析「万/元/㎡」文本、过渡列合并、缺失单价填补…",
-            phase="clean.numeric_finalize",
-            step_id="finalize_listing",
+            "规则文本特征（无 LLM）+ 列 finalize…",
+            phase="clean.rule_features",
+            step_id="rule_features",
         )
-        st.df_clean = finalize_listing_dataframe(st.df_clean)
-        _emit(store, sid, "clean", 52, f"第 {st.clean_attempt_count} 轮清洗完成（已文本数值加固）", phase="clean.done")
+        try:
+            st.df_clean, feat_note = apply_rule_text_features(st.df_clean)
+            st.cleaning_notes = (
+                (st.cleaning_notes + "\n" + feat_note).strip() if st.cleaning_notes else feat_note
+            ).strip()
+            st.cleaning_trace.append("apply_rule_text_features")
+        except Exception as e:
+            _emit(
+                store,
+                sid,
+                "clean",
+                51,
+                f"规则特征跳过：{e}",
+                phase="clean.rule_features",
+                step_id="features_skip",
+            )
+        return {"session_id": sid, "error": None}
+
+    def node_enrich_description(state: PipelineState) -> PipelineState:
+        sid = state["session_id"]
+        if state.get("error"):
+            return state
+        st = store.require(sid)
+        if st.df_clean is None or st.df_clean.empty:
+            return {"session_id": sid, "error": None}
+        _emit(
+            store,
+            sid,
+            "clean",
+            54,
+            "可选 L3：描述文本弱特征（抽样 LLM，失败则跳过）…",
+            phase="clean.description_enrich",
+            step_id="l3_description",
+        )
+        try:
+            from server.tools.description_enrich import enrich_description_columns
+
+            st.df_clean = enrich_description_columns(st.df_clean, settings)
+        except Exception as e:
+            _emit(
+                store,
+                sid,
+                "clean",
+                55,
+                f"L3 描述增强跳过：{e}",
+                phase="clean.description_enrich",
+                step_id="l3_skip",
+            )
         return {"session_id": sid, "error": None}
 
     def node_quality_gate(state: PipelineState) -> PipelineState:
@@ -373,9 +557,9 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         if state.get("error"):
             return state
         st = store.require(sid)
+        # df_clean 已在 feature_engineering 节点 finalize；此处直接使用会话主表
         base = st.df_clean if st.df_clean is not None else st.df_raw
         base = base if base is not None else pd.DataFrame()
-        base = finalize_listing_dataframe(base)
 
         _emit(store, sid, "analyze", 62, "生成分析计划…", phase="analyze.plan", step_id="plan_llm")
         planned_tasks, raw_plan = plan_analysis_with_llm(base, settings)
@@ -402,6 +586,14 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             )
         st.analysis["analysis_summary_markdown"] = summary
         st.analysis_summary_markdown = summary
+        tr = st.analysis.get("task_results")
+        plain = build_analysis_plain_summary(
+            base,
+            st.analysis,
+            tr if isinstance(tr, dict) else None,
+        )
+        st.analysis_summary_plain = plain
+        st.analysis["analysis_summary_plain"] = plain
         _emit(store, sid, "analyze", 75, "分析完成")
         return {"session_id": sid, "error": None}
 
@@ -411,7 +603,6 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
             return state
         st = store.require(sid)
         df = st.df_clean if st.df_clean is not None else pd.DataFrame()
-        df = finalize_listing_dataframe(df) if not df.empty else df
         _emit(store, sid, "viz", 80, "生成交互图表…", phase="viz.build", step_id="plotly")
         st.figures = figures_from_analysis(df, st.analysis)
         _emit(store, sid, "viz", 88, "图表完成", phase="viz.done")
@@ -450,7 +641,7 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         if st.return_cleaned_file and df is not None and not df.empty:
             _emit(store, sid, "export", 96, "写出清洗结果 CSV…", phase="export.cleaned_csv", step_id="cleaned_csv")
             clean_path = out_dir / "cleaned.csv"
-            df.to_csv(clean_path, index=False, encoding="utf-8-sig")
+            slim_cleaned_export_dataframe(df).to_csv(clean_path, index=False, encoding="utf-8-sig")
             st.artifacts["cleaned.csv"] = str(clean_path)
         else:
             st.artifacts.pop("cleaned.csv", None)
@@ -472,13 +663,17 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
     g = StateGraph(PipelineState)
     g.add_node("ingest", node_ingest)
     g.add_node("clean", node_clean)
+    g.add_node("feature_engineering", node_feature_engineering)
+    g.add_node("enrich_description", node_enrich_description)
     g.add_node("quality_gate", node_quality_gate)
     g.add_node("analyze", node_analyze)
     g.add_node("viz", node_viz)
     g.add_node("export", node_export)
     g.set_entry_point("ingest")
     g.add_edge("ingest", "clean")
-    g.add_edge("clean", "quality_gate")
+    g.add_edge("clean", "feature_engineering")
+    g.add_edge("feature_engineering", "enrich_description")
+    g.add_edge("enrich_description", "quality_gate")
     g.add_conditional_edges(
         "quality_gate",
         route_after_quality,

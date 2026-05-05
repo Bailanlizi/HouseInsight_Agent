@@ -6,6 +6,7 @@ STANDARD_COLUMNS: dict[str, str] = {
     "district": "城区",
     "community": "小区",
     "layout": "户型",
+    "layout_normalized": "户型归一化",
     "area_m2": "建筑面积㎡",
     "total_price": "总价万元",
     "unit_price": "单价元每平米",
@@ -22,7 +23,10 @@ STANDARD_COLUMNS: dict[str, str] = {
     "listing_id": "房源编号",
     "building_type": "建筑类型",
     "description_raw": "描述原文",
+    "description_hint_subway": "描述推断地铁相关度0至1",
+    "description_hint_school": "描述推断学区相关度0至1",
     "location_raw": "位置信息原文",
+    "ingest_file": "上传源表文件名不含后缀",
     # 拆分过渡列（与 layout、area_m2 等价写入前可暂存，避免 LLM 臆造非标准键名报错）
     "area_m2_str": "面积拆分过渡",
     "area_m2_text": "面积拆分过渡2",
@@ -30,9 +34,17 @@ STANDARD_COLUMNS: dict[str, str] = {
     "orientation_str": "朝向拆分过渡",
     "floor_text": "楼层原文",
     "publish_time_raw": "发布时间原文",
+    "listing_time": "挂牌时间文本",
     "followers_str": "关注人数过渡",
     "decoration_str": "装修拆分过渡",
     "building_type_str": "建筑类型拆分过渡",
+    # 规则化文本标签（由 description/location/title 等纯代码抽取，非查询时 LLM）
+    "tag_near_subway": "标签近地铁",
+    "tag_near_bus": "标签近公交",
+    "tag_has_balcony": "标签带阳台",
+    "tag_lighting": "标签采光相关",
+    "tag_subway_station_hint": "标签地铁站名提示",
+    "tag_elevator": "标签电梯",
 }
 
 STANDARD_COLUMN_KEYS: frozenset[str] = frozenset(STANDARD_COLUMNS.keys())
@@ -72,6 +84,7 @@ COLUMN_ALIASES: dict[str, str] = {
     "年代": "build_year",
     "挂牌日期": "list_date",
     "挂牌时间": "list_date",
+    "挂牌时间文本": "listing_time",
     "装修": "decoration",
     "装修情况": "decoration",
     "装修类型": "decoration",

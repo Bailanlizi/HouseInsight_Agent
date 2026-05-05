@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from server.agent.house_agent import build_pipeline_graph, pipeline_event, run_chat_turn
@@ -14,6 +14,8 @@ from server.core.paths import ProjectPaths
 from server.core.session_store import SessionStore
 
 router = APIRouter(tags=["houseinsight"])
+
+_PLOTLY_CDN_EMBED = "https://cdn.plot.ly/plotly-2.34.0.min.js"
 
 
 class SessionCreated(BaseModel):
@@ -150,6 +152,7 @@ async def get_analysis(session_id: str, store: SessionStore = Depends(get_store)
         "analysis_plan": st.analysis_plan,
         "analysis_plan_raw": st.analysis_plan_raw,
         "analysis_summary_markdown": st.analysis_summary_markdown,
+        "analysis_summary_plain": st.analysis_summary_plain,
         "cleaning_trace": st.cleaning_trace,
         "quality_report": st.quality_report,
         "clean_attempt_count": st.clean_attempt_count,
@@ -182,6 +185,7 @@ async def get_run_result(session_id: str, store: SessionStore = Depends(get_stor
         "error": st.error,
         "analysis": st.analysis,
         "analysis_summary_markdown": st.analysis_summary_markdown,
+        "analysis_summary_plain": st.analysis_summary_plain,
         "figures_keys": fig_keys,
         "figures_payload_chars": total_chars,
         "figures_too_large_for_inline": total_chars > 500_000,
@@ -203,6 +207,33 @@ async def get_figures(session_id: str, store: SessionStore = Depends(get_store))
     except KeyError:
         raise HTTPException(status_code=404, detail="session not found") from None
     return {"session_id": session_id, "figures": st.figures}
+
+
+@router.get("/sessions/{session_id}/figures/embed", response_class=HTMLResponse)
+async def get_figure_embed(
+    session_id: str,
+    name: str,
+    store: SessionStore = Depends(get_store),
+) -> HTMLResponse:
+    """返回可独立在 iframe 中打开的完整 HTML 文档，使 Plotly 内联脚本正常执行（解决 SPA 内 innerHTML 不跑脚本）。"""
+    try:
+        st = store.require(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="session not found") from None
+    fragment = st.figures.get(name)
+    if not fragment:
+        raise HTTPException(status_code=404, detail="figure not found")
+    frag = str(fragment)
+    low = frag.lower()
+    if "cdn.plot.ly" in low or "plotly.min.js" in low:
+        doc = f'<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>{frag}</body></html>'
+    else:
+        doc = (
+            f'<!DOCTYPE html><html><head><meta charset="utf-8"/>'
+            f'<script src="{_PLOTLY_CDN_EMBED}" charset="utf-8"></script>'
+            f"<style>html,body{{margin:0;padding:4px;}}</style></head><body>{frag}</body></html>"
+        )
+    return HTMLResponse(content=doc)
 
 
 @router.get("/sessions/{session_id}/artifacts")

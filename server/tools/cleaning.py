@@ -3,7 +3,6 @@ from __future__ import annotations
 import pandas as pd
 
 from server.core.session_store import SessionStore
-from server.tools.listing_numeric_parse import parse_object_numeric_columns, promote_staging_columns
 
 # 去重子集：至少两列且各列非空比例达标，避免「仅按总价」等单列把数千行压成一行。
 # 含原文/标题类列，避免同城同价多套房源被误并为一条。
@@ -24,15 +23,22 @@ _PREFERRED_DEDUP_KEYS: tuple[str, ...] = (
 
 
 def resolve_listing_dedup_subset(df: pd.DataFrame, min_non_null_ratio: float = 0.05) -> list[str] | None:
+    """确定去重列：存在 ingest_file 时与 listing_id 组合，避免多区县 Excel 合并后编号撞车被删。"""
+    has_ingest = "ingest_file" in df.columns and bool(df["ingest_file"].notna().any())
+
     if "listing_id" in df.columns:
         ratio = float(df["listing_id"].notna().mean())
         if ratio >= min_non_null_ratio:
+            if has_ingest:
+                return ["ingest_file", "listing_id"]
             nu = int(df["listing_id"].nunique(dropna=True))
             n = len(df)
             if n > 0 and nu >= max(1, int(0.92 * n)):
                 return ["listing_id"]
     keys = [c for c in _PREFERRED_DEDUP_KEYS if c in df.columns]
     keys = [c for c in keys if float(df[c].notna().mean()) >= min_non_null_ratio]
+    if has_ingest:
+        keys = ["ingest_file"] + [k for k in keys if k != "ingest_file"]
     if len(keys) >= 2:
         return keys
     return None
@@ -86,18 +92,13 @@ def remove_price_outliers_iqr(df: pd.DataFrame, col: str = "unit_price", k: floa
 
 
 def apply_default_cleaning_pipeline(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
-    notes: list[str] = []
-    before = len(df)
-    work = promote_staging_columns(df)
-    work = parse_object_numeric_columns(work)
-    work = coerce_numeric_columns(work)
-    work = fill_unit_price_from_total_and_area(work)
-    subset = resolve_listing_dedup_subset(work)
-    work = drop_exact_duplicates(work, subset=subset)
-    notes.append(f"去重后行数: {len(work)} (原始 {before})")
-    work = remove_price_outliers_iqr(work)
-    notes.append(f"IQR 单价异常过滤后行数: {len(work)}")
-    return work, "; ".join(notes)
+    """清洗 + 规则文本特征 + finalize，与 LangGraph 线上一致。"""
+    from server.pipeline.listing_etl import run_listing_etl
+    from server.pipeline.rule_feature_engineering import apply_rule_text_features
+
+    work, note_etl = run_listing_etl(df)
+    work, note_feat = apply_rule_text_features(work)
+    return work, "; ".join(x for x in (note_etl, note_feat) if x)
 
 
 def make_cleaning_tools(store: SessionStore, session_id: str):

@@ -114,7 +114,10 @@ def load_raw_directory(raw_dir: Path) -> tuple[pd.DataFrame, list[str]]:
     warnings: list[str] = []
     for p in paths:
         try:
-            frames.append(read_table(p))
+            tbl = read_table(p)
+            # 多文件合并时各区房源编号常在文件内唯一、跨文件重复；下游按 ingest_file+listing_id 去重
+            tbl["ingest_file"] = p.stem
+            frames.append(tbl)
         except Exception as e:
             warnings.append(f"{p.name}: {type(e).__name__}: {e}")
 

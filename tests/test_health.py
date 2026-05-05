@@ -34,6 +34,13 @@ def test_post_run_json_sets_session_flags() -> None:
     assert st.skip_full_report_export is False
 
 
+def test_figure_embed_404_when_no_figure() -> None:
+    client = TestClient(create_app())
+    sid = client.post("/api/v1/sessions").json()["session_id"]
+    r = client.get(f"/api/v1/sessions/{sid}/figures/embed?name=missing")
+    assert r.status_code == 404
+
+
 def test_run_result_empty_session() -> None:
     client = TestClient(create_app())
     sid = client.post("/api/v1/sessions").json()["session_id"]
@@ -43,3 +50,4 @@ def test_run_result_empty_session() -> None:
     assert body["session_id"] == sid
     assert body["stage"] == "idle"
     assert body["progress_events"] == []
+    assert "analysis_summary_plain" in body

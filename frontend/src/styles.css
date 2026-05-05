@@ -68,6 +68,11 @@ pre.log-tall {
   word-break: break-word;
 }
 
+pre.log-plain {
+  color: #e8ecf7;
+  line-height: 1.65;
+}
+
 ol.progress-list {
   margin: 8px 0 0;
   padding-left: 1.25rem;
