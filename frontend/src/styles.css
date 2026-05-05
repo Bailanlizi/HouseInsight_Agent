@@ -1,87 +1,93 @@
-:root {
-  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-  color: #111;
-  background: #f6f7fb;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    @apply min-h-screen text-slate-800 antialiased;
+  }
+
+  body {
+    background: linear-gradient(135deg, #fff1f2 0%, #fff7ed 50%, #fffbeb 100%);
+    background-attachment: fixed;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial,
+      "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+
+  ::selection {
+    background: rgba(244, 63, 94, 0.2);
+  }
+
+  code,
+  kbd {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
 }
 
-body {
-  margin: 0;
+@layer components {
+  .card {
+    @apply bg-white/80 backdrop-blur-sm border border-rose-100 rounded-2xl p-5 sm:p-6 shadow-sm;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 h-10 px-5 rounded-xl
+      bg-gradient-to-r from-rose-500 to-orange-500 text-white text-sm font-medium
+      shadow-sm shadow-rose-500/20
+      hover:from-rose-600 hover:to-orange-600
+      focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-500
+      disabled:opacity-50 disabled:cursor-not-allowed
+      transition-all;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 h-10 px-4 rounded-xl
+      bg-white/70 border border-rose-100 text-slate-700 text-sm font-medium
+      hover:bg-rose-50/70 hover:border-rose-200
+      focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-500
+      disabled:opacity-50 disabled:cursor-not-allowed
+      transition-colors;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full
+      bg-rose-50/80 border border-rose-100 text-rose-700 text-xs font-medium;
+  }
+
+  .btn-pill-ghost {
+    @apply inline-flex items-center gap-1.5 h-8 px-3 rounded-full
+      bg-rose-50/80 border border-rose-100 text-rose-600 text-xs font-medium
+      hover:bg-rose-100/80 disabled:opacity-50 disabled:cursor-not-allowed transition-colors;
+  }
+
+  .text-link {
+    @apply text-rose-500 hover:text-rose-600 text-sm font-medium
+      underline-offset-4 hover:underline transition-colors
+      disabled:opacity-50 disabled:cursor-not-allowed disabled:no-underline;
+  }
 }
 
-.layout {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 24px;
-}
+@layer utilities {
+  .spin {
+    animation: spin 0.8s linear infinite;
+  }
 
-.card {
-  background: #fff;
-  border: 1px solid #e8e8ef;
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-}
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
 
-.row {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-button {
-  cursor: pointer;
-  border-radius: 8px;
-  border: 1px solid #cfd6ff;
-  background: #eef0ff;
-  padding: 8px 12px;
-}
-
-button.primary {
-  background: #3b5bdb;
-  border-color: #3b5bdb;
-  color: #fff;
-}
-
-input[type="text"],
-textarea {
-  width: 100%;
-  box-sizing: border-box;
-  border-radius: 8px;
-  border: 1px solid #ddd;
-  padding: 8px;
-}
-
-pre.log {
-  background: #0b1020;
-  color: #d7e0ff;
-  padding: 12px;
-  border-radius: 8px;
-  max-height: 220px;
-  overflow: auto;
-  font-size: 12px;
-}
-
-pre.log-tall {
-  max-height: 360px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-pre.log-plain {
-  color: #e8ecf7;
-  line-height: 1.65;
-}
-
-ol.progress-list {
-  margin: 8px 0 0;
-  padding-left: 1.25rem;
-  font-size: 13px;
-  max-height: 280px;
-  overflow: auto;
-}
-
-.muted {
-  color: #666;
-  font-size: 13px;
+  /* Subtle scrollbar in chat / log areas */
+  .scroll-soft::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scroll-soft::-webkit-scrollbar-thumb {
+    background: rgba(244, 63, 94, 0.18);
+    border-radius: 999px;
+  }
+  .scroll-soft::-webkit-scrollbar-thumb:hover {
+    background: rgba(244, 63, 94, 0.32);
+  }
 }
