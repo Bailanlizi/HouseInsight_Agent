@@ -1,6 +1,5 @@
 """在无 LLM 密钥时跑通整条 LangGraph（默认规则清洗）。"""
 
-import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -10,14 +9,9 @@ from server.core.config import Settings
 from server.core.paths import ProjectPaths
 from server.core.session_store import SessionStore
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
 
 def test_pipeline_end_to_end_without_llm(tmp_path: Path) -> None:
     root = tmp_path
-    tpl_dir = root / "templates"
-    tpl_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(REPO_ROOT / "templates" / "report_template.html", tpl_dir / "report_template.html")
     raw = root / "data" / "raw" / "s1"
     raw.mkdir(parents=True)
     df = pd.DataFrame(
@@ -36,8 +30,6 @@ def test_pipeline_end_to_end_without_llm(tmp_path: Path) -> None:
     store = SessionStore()
     st = store.create_session()
     sid = st.session_id
-    st.skip_full_report_export = False  # 测试需 HTML 产物；API 默认 True 会跳过
-    # 把文件写到期望 raw 目录（模拟上传）
     dest_raw = paths.raw_dir(sid)
     pd.read_csv(raw / "a.csv", encoding="utf-8-sig").to_csv(dest_raw / "a.csv", index=False, encoding="utf-8-sig")
 
@@ -47,15 +39,14 @@ def test_pipeline_end_to_end_without_llm(tmp_path: Path) -> None:
 
     st2 = store.require(sid)
     assert st2.stage == "done"
-    assert "report.html" in st2.artifacts
-    assert Path(st2.artifacts["report.html"]).exists()
+    assert "report.xlsx" in st2.artifacts
+    assert Path(st2.artifacts["report.xlsx"]).exists()
+    assert "report.html" not in st2.artifacts
+    assert "report.pdf" not in st2.artifacts
 
 
 def test_cleaned_csv_when_flag_enabled(tmp_path: Path) -> None:
     root = tmp_path
-    tpl_dir = root / "templates"
-    tpl_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(REPO_ROOT / "templates" / "report_template.html", tpl_dir / "report_template.html")
     raw = root / "data" / "raw" / "s1"
     raw.mkdir(parents=True)
     df = pd.DataFrame(
@@ -75,7 +66,6 @@ def test_cleaned_csv_when_flag_enabled(tmp_path: Path) -> None:
     st = store.create_session()
     sid = st.session_id
     st.return_cleaned_file = True
-    st.skip_full_report_export = True
     dest_raw = paths.raw_dir(sid)
     pd.read_csv(raw / "b.csv", encoding="utf-8-sig").to_csv(dest_raw / "b.csv", index=False, encoding="utf-8-sig")
 

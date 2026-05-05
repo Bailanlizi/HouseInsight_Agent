@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiUrl, wsUrl } from "./api";
-import { PlotlyFigure } from "./PlotlyFigure";
 
 type ProgressEvt = {
   stage?: string;
@@ -20,8 +19,6 @@ type RunResult = {
   analysis?: unknown;
   analysis_summary_markdown?: string;
   analysis_summary_plain?: string;
-  figures_keys?: string[];
-  figures_too_large_for_inline?: boolean;
   artifacts?: Record<string, string>;
   progress_events?: ProgressEvt[];
 };
@@ -32,14 +29,12 @@ export default function App() {
   const [sessionId, setSessionId] = useState<string>("");
   const [log, setLog] = useState<string>("");
   const [status, setStatus] = useState<string>("");
-  const [figures, setFigures] = useState<Record<string, string>>({});
   const [analysisSummaryPlain, setAnalysisSummaryPlain] = useState<string>("");
   const [artifactNames, setArtifactNames] = useState<string[]>([]);
   const [progressEvents, setProgressEvents] = useState<ProgressEvt[]>([]);
   const [returnCleanedFile, setReturnCleanedFile] = useState(false);
   const [chatIn, setChatIn] = useState("");
   const [chatOut, setChatOut] = useState<string>("");
-  const [chatSources, setChatSources] = useState<{ label: string; detail: string }[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
 
   const appendLog = useCallback((line: string) => {
@@ -60,19 +55,6 @@ export default function App() {
         setProgressEvents(j.progress_events);
       }
       setStatus(`${j.stage ?? "?"} (${j.progress_pct ?? 0}%) — ${j.last_message ?? ""}`);
-
-      if (j.figures_too_large_for_inline) {
-        appendLog(
-          `图表 HTML 合计约 ${(j as { figures_payload_chars?: number }).figures_payload_chars ?? "?"} 字符，前端跳过内联加载；可单独请求 GET .../figures。`,
-        );
-        setFigures({});
-      } else {
-        const ff = await api(`/api/v1/sessions/${sid}/figures`);
-        if (ff.ok) {
-          const fj = (await ff.json()) as { figures?: Record<string, string> };
-          setFigures(fj.figures ?? {});
-        }
-      }
     },
     [appendLog],
   );
@@ -195,21 +177,12 @@ export default function App() {
     if (!r.ok) {
       const t = await r.text();
       setChatOut(`错误: ${t}`);
-      setChatSources([]);
       return;
     }
-    const j = (await r.json()) as { reply?: string; sources?: { label: string; detail: string }[] };
+    const j = (await r.json()) as { reply?: string };
     setChatOut(j.reply ?? "");
-    setChatSources(j.sources ?? []);
     setChatIn("");
   };
-
-  const figEntries = useMemo(() => Object.entries(figures), [figures]);
-
-  const reportUrl =
-    sessionId && artifactNames.includes("report.html")
-      ? apiUrl(`/api/v1/sessions/${sessionId}/artifacts/download?name=report.html`)
-      : "";
 
   const uploadDisabled = !sessionId;
 
@@ -252,18 +225,12 @@ export default function App() {
             运行分析流水线
           </button>
           <button type="button" onClick={() => sessionId && void refreshRunResult(sessionId)} disabled={!sessionId}>
-            刷新状态与图表
+            刷新状态
           </button>
-          {reportUrl ? (
-            <a href={reportUrl} target="_blank" rel="noreferrer">
-              打开 HTML 报告
-            </a>
-          ) : null}
         </div>
         <p className="muted">
-          <strong>刷新状态与图表</strong>
-          ：拉取 <code>run_result</code> 聚合接口与图表；适用于 WebSocket 漏消息或跑完后对齐界面。默认不生成 HTML 报告（仅 Excel
-          等轻量产物），有 <code>report.html</code> 时才会显示「打开 HTML 报告」链接。
+          <strong>刷新状态</strong>：拉取 <code>run_result</code> 聚合接口；适用于 WebSocket 漏消息或跑完后对齐界面。
+          产物为 <code>report.xlsx</code>（可选 <code>cleaned.csv</code>）。
         </p>
         <p className="muted">{status}</p>
         {artifactNames.length > 0 ? (
@@ -309,17 +276,6 @@ export default function App() {
       </div>
 
       <div className="card">
-        <h3>交互图表（Plotly HTML）</h3>
-        {figEntries.length === 0 ? <p className="muted">运行完成后会自动刷新；也可手动点「刷新状态与图表」。</p> : null}
-        {figEntries.map(([name]) => (
-          <div key={name} className="figure">
-            <div className="muted">{name}</div>
-            <PlotlyFigure sessionId={sessionId} figureName={name} title={name} />
-          </div>
-        ))}
-      </div>
-
-      <div className="card">
         <h3>分析总结</h3>
         <p className="muted" style={{ marginBottom: 8 }}>
           约 300～500 字纯文本结论（数据概览、价格、供应与关键发现）；跑完流水线后由 <code>run_result</code> 填充。
@@ -342,18 +298,6 @@ export default function App() {
         <pre className="log" style={{ marginTop: 12 }}>
           {chatOut || "（暂无回复）"}
         </pre>
-        {chatSources.length > 0 ? (
-          <div className="sources-muted">
-            <div>数据来源（结构化）</div>
-            <ul>
-              {chatSources.map((s) => (
-                <li key={s.label}>
-                  <strong>{s.label}</strong>：{s.detail}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
       </div>
     </div>
   );

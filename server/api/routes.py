@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from server.agent.house_agent import build_pipeline_graph, pipeline_event, run_chat_turn
@@ -14,8 +14,6 @@ from server.core.paths import ProjectPaths
 from server.core.session_store import SessionStore
 
 router = APIRouter(tags=["houseinsight"])
-
-_PLOTLY_CDN_EMBED = "https://cdn.plot.ly/plotly-2.34.0.min.js"
 
 
 class SessionCreated(BaseModel):
@@ -162,13 +160,11 @@ async def get_analysis(session_id: str, store: SessionStore = Depends(get_store)
 
 @router.get("/sessions/{session_id}/run_result")
 async def get_run_result(session_id: str, store: SessionStore = Depends(get_store)) -> dict[str, object]:
-    """聚合首屏：分析摘要、图表键、产物键、质检与进度时间线尾部。"""
+    """聚合首屏：分析摘要、产物键、质检与进度时间线尾部。"""
     try:
         st = store.require(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="session not found") from None
-    fig_keys = list(st.figures.keys())
-    total_chars = sum(len(v) for v in st.figures.values())
     qr = st.quality_report
     quality_brief: dict[str, object] = {}
     if isinstance(qr, dict):
@@ -186,9 +182,6 @@ async def get_run_result(session_id: str, store: SessionStore = Depends(get_stor
         "analysis": st.analysis,
         "analysis_summary_markdown": st.analysis_summary_markdown,
         "analysis_summary_plain": st.analysis_summary_plain,
-        "figures_keys": fig_keys,
-        "figures_payload_chars": total_chars,
-        "figures_too_large_for_inline": total_chars > 500_000,
         "artifacts": st.artifacts,
         "quality_report": st.quality_report,
         "quality_brief": quality_brief,
@@ -198,42 +191,6 @@ async def get_run_result(session_id: str, store: SessionStore = Depends(get_stor
             "skip_full_report_export": st.skip_full_report_export,
         },
     }
-
-
-@router.get("/sessions/{session_id}/figures")
-async def get_figures(session_id: str, store: SessionStore = Depends(get_store)) -> dict[str, object]:
-    try:
-        st = store.require(session_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="session not found") from None
-    return {"session_id": session_id, "figures": st.figures}
-
-
-@router.get("/sessions/{session_id}/figures/embed", response_class=HTMLResponse)
-async def get_figure_embed(
-    session_id: str,
-    name: str,
-    store: SessionStore = Depends(get_store),
-) -> HTMLResponse:
-    """返回可独立在 iframe 中打开的完整 HTML 文档，使 Plotly 内联脚本正常执行（解决 SPA 内 innerHTML 不跑脚本）。"""
-    try:
-        st = store.require(session_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="session not found") from None
-    fragment = st.figures.get(name)
-    if not fragment:
-        raise HTTPException(status_code=404, detail="figure not found")
-    frag = str(fragment)
-    low = frag.lower()
-    if "cdn.plot.ly" in low or "plotly.min.js" in low:
-        doc = f'<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>{frag}</body></html>'
-    else:
-        doc = (
-            f'<!DOCTYPE html><html><head><meta charset="utf-8"/>'
-            f'<script src="{_PLOTLY_CDN_EMBED}" charset="utf-8"></script>'
-            f"<style>html,body{{margin:0;padding:4px;}}</style></head><body>{frag}</body></html>"
-        )
-    return HTMLResponse(content=doc)
 
 
 @router.get("/sessions/{session_id}/artifacts")
@@ -273,5 +230,5 @@ async def chat(session_id: str, body: ChatIn, store: SessionStore = Depends(get_
     settings = get_settings()
     if not settings.dashscope_api_key:
         raise HTTPException(status_code=400, detail="DASHSCOPE_API_KEY 未配置，无法对话")
-    reply, sources = run_chat_turn(store, session_id, body.message, settings)
-    return ChatOut(reply=reply, sources=sources)
+    reply = run_chat_turn(store, session_id, body.message, settings)
+    return ChatOut(reply=reply, sources=[])

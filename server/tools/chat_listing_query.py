@@ -319,7 +319,7 @@ def _intent_relevance_scores(df: pd.DataFrame, intent: ListingSearchIntent) -> p
     if intent.near_subway is True:
         sub_tag = pd.Series(0.0, index=df.index)
         if "tag_near_subway" in df.columns:
-            sub_tag = df["tag_near_subway"].astype(bool).astype(float) * _W_SUBWAY_TAG
+            sub_tag = df["tag_near_subway"].fillna(False).astype(bool).astype(float) * _W_SUBWAY_TAG
         sub_txt = (
             blob.str.contains("地铁", case=False, na=False, regex=False)
             | blob.str.contains("号线", case=False, na=False, regex=False)
@@ -338,7 +338,7 @@ def _intent_relevance_scores(df: pd.DataFrame, intent: ListingSearchIntent) -> p
 
     if intent.has_balcony is True:
         b_tag = (
-            df["tag_has_balcony"].astype(bool).astype(float) * _W_BALCONY_TAG
+            df["tag_has_balcony"].fillna(False).astype(bool).astype(float) * _W_BALCONY_TAG
             if "tag_has_balcony" in df.columns
             else pd.Series(0.0, index=df.index)
         )
@@ -350,7 +350,7 @@ def _intent_relevance_scores(df: pd.DataFrame, intent: ListingSearchIntent) -> p
 
     if intent.lighting_preferred is True:
         l_tag = (
-            df["tag_lighting"].astype(bool).astype(float) * _W_LIGHT_TAG
+            df["tag_lighting"].fillna(False).astype(bool).astype(float) * _W_LIGHT_TAG
             if "tag_lighting" in df.columns
             else pd.Series(0.0, index=df.index)
         )

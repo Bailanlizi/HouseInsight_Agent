@@ -21,10 +21,9 @@ from server.tools.cleaning_housing import derive_floor_band_column
 from server.tools.composite_field_parse import expand_composite_listing_columns
 from server.tools.data_quality import assess_clean_quality, coach_clean_retry_hints
 from server.tools.listing_numeric_parse import finalize_listing_dataframe, slim_cleaned_export_dataframe
-from server.tools.export import maybe_render_pdf, render_report_html, write_excel_report
+from server.tools.export import write_excel_report
 from server.tools.io import canonicalize_known_aliases, iter_tabular_paths, load_raw_directory
 from server.tools.registry import build_cleaning_tools_for_session
-from server.tools.viz import figures_from_analysis
 
 
 class PipelineState(TypedDict, total=False):
@@ -97,41 +96,6 @@ def pipeline_event(
     _emit(store, session_id, stage, pct, msg, phase=phase, step_id=step_id, event=event)
 
 
-def _chat_columns_mentioned_in_question(user_text: str, columns: list[str]) -> list[str]:
-    out: list[str] = []
-    for c in columns:
-        if c and c in user_text:
-            out.append(c)
-    return out[:16]
-
-
-def _build_chat_provenance(
-    st: SessionState, user_text: str
-) -> tuple[str, list[dict[str, str]]]:
-    n = len(st.df_clean) if st.df_clean is not None else 0
-    cols = list(st.df_clean.columns) if st.df_clean is not None else []
-    hinted = _chat_columns_mentioned_in_question(user_text, cols)
-    col_preview = ", ".join(cols[:12]) + ("…" if len(cols) > 12 else "")
-    footer_lines = [
-        "",
-        "---",
-        "【数据来源】",
-        f"· 会话清洗表 df_clean：约 {n} 行，{len(cols)} 列（列名示例：{col_preview or '无'}）。",
-        "· 统计与图表：基于本会话流水线生成的 analysis / figures，非实时重算全表。",
-        "· 未对原始上传文件做逐行人工核对；若问题超出摘要范围，结论可能不完整。",
-    ]
-    if hinted:
-        footer_lines.append(f"· 本问与列名显式相关：{', '.join(hinted)}。")
-    footer = "\n".join(footer_lines)
-    sources: list[dict[str, str]] = [
-        {"label": "df_clean", "detail": f"{n} 行 × {len(cols)} 列"},
-        {"label": "analysis", "detail": "会话内结构化分析结果"},
-    ]
-    if hinted:
-        sources.append({"label": "提及列", "detail": ", ".join(hinted)})
-    return footer, sources
-
-
 def _build_llm(settings: Settings):
     from langchain_openai import ChatOpenAI
 
@@ -198,13 +162,14 @@ def _aggregated_chat_context(st: SessionState) -> str:
 
 def run_chat_turn(
     store: SessionStore, session_id: str, user_text: str, settings: Settings | None = None
-) -> tuple[str, list[dict[str, str]]]:
+) -> str:
     settings = settings or get_settings()
     st = store.require(session_id)
     llm = _build_llm(settings)
     history = st.chat_messages[-12:]
     listing_block = ""
-    query_sources: list[dict[str, str]] = []
+    sample_count = 0
+    sample_max_rows = 0
     if settings.dashscope_api_key and st.df_clean is not None and len(st.df_clean) > 0:
         try:
             from server.tools.chat_listing_query import (
@@ -222,28 +187,24 @@ def run_chat_turn(
             )
             if intent and intent.needs_row_samples:
                 sub, query_relax_note = apply_listing_search_intent(st.df_clean, intent)
-                n = len(sub)
-                if n == 0:
+                sample_count = len(sub)
+                sample_max_rows = int(intent.max_rows)
+                if sample_count == 0:
                     note_prefix = f"\n\n{query_relax_note}" if query_relax_note else ""
                     listing_block = (
                         note_prefix
-                        + "\n\n[查询结果] 当前筛选条件下无匹配行。"
-                        "请用中文告知用户并建议放宽城区、小区名或价格条件。"
+                        + "\n\n[查询结果] 0 条匹配；如实告知用户『当前未找到符合条件的房源』，"
+                        "并给出一条具体的放宽建议（例如：放宽城区、放宽价格、去掉某个标签）。"
                     )
-                    query_sources.append({"label": "listing_query", "detail": "0 条"})
                 else:
                     relax_prefix = (
                         f"\n\n[查询说明] {query_relax_note}\n" if query_relax_note else ""
                     )
                     listing_block = (
                         relax_prefix
-                        + "\n\n[以下为会话 df_clean 经白名单规则筛选后的 JSON 样本；"
-                        "回答时仅可引用其中的字段与数值列出具体房源，勿编造未出现的列或行；"
-                        "请用简洁条目或短列表呈现，避免冗长 Markdown 大表。]\n"
+                        + f"\n\n[查询结果] 实际命中 {sample_count} 条（用户上限 {sample_max_rows}）。"
+                        "回答必须如实报出 N 条；禁止补足、编造或拼凑到上限；不得引用未出现在 JSON 中的房源、字段或数值。\n"
                         + listings_to_llm_block(sub)
-                    )
-                    query_sources.append(
-                        {"label": "listing_query", "detail": f"{n} 条（单次最多 {intent.max_rows}）"}
                     )
         except Exception:
             pass
@@ -251,15 +212,12 @@ def run_chat_turn(
     msgs: list[Any] = [
         SystemMessage(
             content=(
-                "你是二手房数据分析助手。只能基于对话中给出的【会话聚合信息】、已知的 analysis 结论、"
-                "以及（若有）【JSON 样本】作答。"
-                "若附有 JSON 数组，用户询问具体房源时应用其中的小区、价格、户型等字段逐条或概括回答；"
-                "禁止编造 JSON 中不存在的房源。"
-                "若有行级样本：回答务求简洁，优先短列表或要点，避免默认输出超长 Markdown 表格。"
-                "若无行级样本且用户问了具体房源：先用 2～4 条要点说明原因，再给一条可操作的放宽建议；"
-                "不要长篇铺陈。"
-                "若无行级样本而用户只要统计结论，则仅基于聚合信息。"
-                "信息不足时请直接说明。"
+                "你是二手房数据分析助手。只能基于对话中给出的【会话聚合信息】、analysis 结论、"
+                "以及（若有）【JSON 样本】作答，必须遵守以下规则：\n"
+                "1) 如实告知数量：如果 JSON 命中 N 套就明确报 N 套（含 0 套）；不要扩展、不要凑齐到任何上限。\n"
+                "2) 严禁编造：不得引用 JSON 之外的房源、小区、价格、字段；当字段为空（NaN/null/空串）时视为不满足该条件，不要猜测。\n"
+                "3) 命中较少时：先告诉用户实际命中数，再用一条具体可操作的建议主动提示放宽（例如『去掉近地铁条件』），但不得为了凑数把不符合的样本说成符合。\n"
+                "4) 输出风格：有行级样本时用短条目或要点，避免长 Markdown 表；只问统计/概念时仅基于聚合信息；信息不足时直接说明。"
             )
         ),
     ]
@@ -274,14 +232,10 @@ def run_chat_turn(
     msgs.append(HumanMessage(content=user_text + summary + listing_block))
     ai = llm.invoke(msgs)
     text = getattr(ai, "content", str(ai))
-    footer, sources = _build_chat_provenance(st, user_text)
-    if query_sources:
-        footer += "\n· 本问在可能时附带了经规则筛选的房源行级样本（见 listing_query）。"
-    sources = query_sources + sources
-    full_reply = text + footer
+    full_reply = text
     st.chat_messages.append({"role": "user", "content": user_text})
     st.chat_messages.append({"role": "assistant", "content": full_reply})
-    return full_reply, sources
+    return full_reply
 
 
 def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Settings):
@@ -528,7 +482,7 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         st.quality_report = report
         if report.get("passed"):
             st.quality_coach_hint = ""
-            _emit(store, sid, "quality", 58, "质检通过，进入分析与可视化")
+            _emit(store, sid, "quality", 58, "质检通过，进入分析与导出")
         else:
             st.quality_coach_hint = coach_clean_retry_hints(settings, report)
             fails = ",".join(report.get("failures") or [])
@@ -597,17 +551,6 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         _emit(store, sid, "analyze", 75, "分析完成")
         return {"session_id": sid, "error": None}
 
-    def node_viz(state: PipelineState) -> PipelineState:
-        sid = state["session_id"]
-        if state.get("error"):
-            return state
-        st = store.require(sid)
-        df = st.df_clean if st.df_clean is not None else pd.DataFrame()
-        _emit(store, sid, "viz", 80, "生成交互图表…", phase="viz.build", step_id="plotly")
-        st.figures = figures_from_analysis(df, st.analysis)
-        _emit(store, sid, "viz", 88, "图表完成", phase="viz.done")
-        return {"session_id": sid, "error": None}
-
     def node_export(state: PipelineState) -> PipelineState:
         sid = state["session_id"]
         if state.get("error"):
@@ -616,27 +559,12 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         df = st.df_clean if st.df_clean is not None else st.df_raw
         out_dir = paths.output_dir(sid)
         out_dir.mkdir(parents=True, exist_ok=True)
-        summary_md = st.analysis_summary_markdown or st.analysis.get("analysis_summary_markdown") or ""
 
         _emit(store, sid, "export", 90, "写出轻量 Excel 样本…", phase="export.xlsx", step_id="report_xlsx")
         xlsx_path = write_excel_report(out_dir, df if df is not None else pd.DataFrame(), st.analysis)
         st.artifacts["report.xlsx"] = str(xlsx_path)
-
-        if not st.skip_full_report_export:
-            _emit(store, sid, "export", 93, "生成 HTML 报告…", phase="export.html", step_id="report_html")
-            html_path = render_report_html(
-                paths, sid, st.analysis, st.figures, st.cleaning_notes, narrative=summary_md
-            )
-            st.artifacts["report.html"] = str(html_path)
-            pdf_path = out_dir / "report.pdf"
-            pdf = maybe_render_pdf(html_path, pdf_path)
-            if pdf:
-                st.artifacts["report.pdf"] = str(pdf)
-            else:
-                st.artifacts.pop("report.pdf", None)
-        else:
-            st.artifacts.pop("report.html", None)
-            st.artifacts.pop("report.pdf", None)
+        st.artifacts.pop("report.html", None)
+        st.artifacts.pop("report.pdf", None)
 
         if st.return_cleaned_file and df is not None and not df.empty:
             _emit(store, sid, "export", 96, "写出清洗结果 CSV…", phase="export.cleaned_csv", step_id="cleaned_csv")
@@ -667,7 +595,6 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
     g.add_node("enrich_description", node_enrich_description)
     g.add_node("quality_gate", node_quality_gate)
     g.add_node("analyze", node_analyze)
-    g.add_node("viz", node_viz)
     g.add_node("export", node_export)
     g.set_entry_point("ingest")
     g.add_edge("ingest", "clean")
@@ -679,7 +606,6 @@ def build_pipeline_graph(store: SessionStore, paths: ProjectPaths, settings: Set
         route_after_quality,
         {"clean": "clean", "analyze": "analyze"},
     )
-    g.add_edge("analyze", "viz")
-    g.add_edge("viz", "export")
+    g.add_edge("analyze", "export")
     g.add_edge("export", END)
     return g.compile()

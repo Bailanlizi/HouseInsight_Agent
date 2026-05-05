@@ -24,7 +24,6 @@ class SessionState:
     df_raw: pd.DataFrame | None = None
     df_clean: pd.DataFrame | None = None
     analysis: dict[str, Any] = field(default_factory=dict)
-    figures: dict[str, str] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
     chat_messages: list[dict[str, str]] = field(default_factory=list)
     cleaning_notes: str = ""
