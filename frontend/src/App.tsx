@@ -3,7 +3,6 @@ import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
-  ChevronUp,
   Clock,
   Database,
   Download,
@@ -14,7 +13,6 @@ import {
   RefreshCw,
   Send,
   Sparkles,
-  Terminal,
   Upload,
   X,
 } from "lucide-react";
@@ -100,7 +98,6 @@ export default function App() {
   const [sessionStage, setSessionStage] = useState<string>("");
   const [progressPct, setProgressPct] = useState<number>(0);
   const [lastMessage, setLastMessage] = useState<string>("");
-  const [log, setLog] = useState("");
   const [analysisSummaryPlain, setAnalysisSummaryPlain] = useState("");
   const [artifactNames, setArtifactNames] = useState<string[]>([]);
   const [progressEvents, setProgressEvents] = useState<ProgressEvt[]>([]);
@@ -112,7 +109,7 @@ export default function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [busy, setBusy] = useState<BusyKey>(null);
   const [wsOnline, setWsOnline] = useState(false);
-  const [logExpanded, setLogExpanded] = useState(false);
+  const [pipelineExpanded, setPipelineExpanded] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -125,10 +122,6 @@ export default function App() {
   const busyRefresh = busy === "refresh";
   const busyChat = busy === "chat";
 
-  const appendLog = useCallback((line: string) => {
-    setLog((s) => (s ? `${s}\n${line}` : line));
-  }, []);
-
   const refreshRunResult = useCallback(
     async (sid: string, silent = false): Promise<boolean> => {
       if (!silent) setBusy("refresh");
@@ -136,7 +129,6 @@ export default function App() {
         const rr = await api(`/api/v1/sessions/${sid}/run_result`);
         if (!rr.ok) {
           setErrorBanner(await parseHttpError(rr));
-          appendLog(`run_result HTTP ${rr.status}`);
           return false;
         }
         setErrorBanner(null);
@@ -153,13 +145,12 @@ export default function App() {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         setErrorBanner(msg);
-        appendLog(`刷新失败: ${msg}`);
         return false;
       } finally {
         if (!silent) setBusy(null);
       }
     },
-    [appendLog],
+    [],
   );
 
   const connectWs = useCallback(
@@ -169,22 +160,18 @@ export default function App() {
         wsRef.current = null;
       }
       const url = wsUrl(`/api/v1/ws/sessions/${sid}`);
-      appendLog(`WebSocket 连接: ${url}`);
       const ws = new WebSocket(url);
       wsRef.current = ws;
       ws.onopen = () => {
         setWsOnline(true);
-        appendLog("WebSocket 已连接");
       };
-      ws.onclose = (ev) => {
+      ws.onclose = () => {
         setWsOnline(false);
-        appendLog(`WebSocket 关闭 code=${ev.code}`);
       };
       ws.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data as string) as ProgressEvt;
           if (data.stage === "ping") return;
-          appendLog(`[${data.stage ?? "?"} ${data.pct ?? "-"}%] ${data.msg ?? ""}`);
           setProgressEvents((prev) => {
             const next = [...prev, data];
             return next.length > 200 ? next.slice(-200) : next;
@@ -194,15 +181,14 @@ export default function App() {
           if (data.msg) setLastMessage(data.msg);
           if (data.event === "run_complete" || data.stage === "done") void refreshRunResult(sid, true);
         } catch {
-          appendLog(String(ev.data));
+          /* ignore parse errors */
         }
       };
       ws.onerror = () => {
         setWsOnline(false);
-        appendLog("WebSocket 异常（请确认后端已启动且端口可达）");
       };
     },
-    [appendLog, refreshRunResult],
+    [refreshRunResult],
   );
 
   useEffect(() => {
@@ -247,7 +233,7 @@ export default function App() {
       setHasUploaded(false);
       setPendingFiles([]);
       setChatMessages([]);
-      appendLog(`会话已创建: ${sid}`);
+      setPipelineExpanded(false);
       connectWs(sid);
     } catch (e) {
       setErrorBanner(e instanceof Error ? e.message : String(e));
@@ -306,18 +292,15 @@ export default function App() {
       const r = await api(`/api/v1/sessions/${sid}/upload`, { method: "POST", body: fd });
       if (!r.ok) {
         setErrorBanner(await parseHttpError(r));
-        appendLog(`上传失败 HTTP ${r.status}`);
         return false;
       }
-      const j = (await r.json()) as { saved?: string[] };
+      await r.json();
       setHasUploaded(true);
       setPendingFiles([]);
-      appendLog(`上传完成: ${JSON.stringify(j.saved ?? [])}`);
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorBanner(msg);
-      appendLog(`上传异常: ${msg}`);
       return false;
     } finally {
       setBusy(null);
@@ -337,7 +320,6 @@ export default function App() {
     }
 
     setBusy("run");
-    appendLog("启动流水线…");
     try {
       const r = await api(`/api/v1/sessions/${sessionId}/run`, {
         method: "POST",
@@ -349,14 +331,11 @@ export default function App() {
       });
       if (!r.ok) {
         setErrorBanner(await parseHttpError(r));
-        appendLog(`启动失败 HTTP ${r.status}`);
         return;
       }
-      appendLog("已提交运行（进度见下方时间线或 WebSocket）");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setErrorBanner(msg);
-      appendLog(`启动异常: ${msg}`);
     } finally {
       setBusy(null);
     }
@@ -585,53 +564,63 @@ export default function App() {
 
         {/* Progress Card */}
         {showProgress ? (
-          <section className="card">
+          <section className="card-progress">
             <div className="flex items-center gap-2 mb-4">
               <Clock size={18} strokeWidth={1.75} className="text-rose-500" />
-              <h2 className="text-base font-semibold text-slate-800">处理进度</h2>
+              <h2 className="text-base font-semibold text-slate-800 tracking-tight">处理进度</h2>
               <StageBadge status={stageStatus} />
-              <button
-                type="button"
-                onClick={() => setLogExpanded((v) => !v)}
-                className="ml-auto inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700"
-              >
-                <Terminal size={12} />
-                {logExpanded ? "收起日志" : "查看日志"}
-                {logExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-              </button>
             </div>
 
-            <ProgressBar pct={progressPct} done={stageStatus === "done"} />
-            {lastMessage ? (
-              <p className="mt-2 text-xs text-slate-500 truncate">{lastMessage}</p>
-            ) : null}
-
-            {/* Simplified timeline */}
-            <ol className="mt-4 space-y-1.5 max-h-60 overflow-auto scroll-soft pr-1">
-              {progressEvents.slice(-30).map((ev, i) => {
-                const Icon = stageIcon(ev.stage);
-                const label = stageLabelMap[ev.stage ?? ""] ?? ev.stage ?? "?";
-                return (
-                  <li
-                    key={`${ev.ts ?? ""}-${i}`}
-                    className="flex items-center gap-3 text-xs text-slate-600"
-                  >
-                    <Icon size={14} className="text-rose-400 shrink-0" />
-                    <span className="font-medium text-slate-700 w-14 shrink-0">{label}</span>
-                    <span className="flex-1 truncate">{ev.msg ?? ""}</span>
-                    <span className="text-slate-400 tabular-nums shrink-0">{ev.pct ?? "-"}%</span>
-                  </li>
-                );
-              })}
-              {progressEvents.length === 0 ? (
-                <li className="text-xs text-slate-400">尚无事件，等待后端推送…</li>
-              ) : null}
-            </ol>
-
-            {logExpanded ? (
-              <div className="mt-4 rounded-xl bg-slate-900 text-slate-100 p-4 font-mono text-xs leading-relaxed max-h-64 overflow-auto scroll-soft whitespace-pre-wrap break-words">
-                {log || "（暂无原始日志）"}
+            <button
+              type="button"
+              onClick={() => setPipelineExpanded((v) => !v)}
+              className="w-full rounded-xl border border-transparent p-1 -m-1 text-left outline-none transition hover:border-rose-200/80 hover:bg-rose-50/50 focus-visible:ring-2 focus-visible:ring-rose-200 focus-visible:ring-offset-2 focus-visible:ring-offset-[#FFFBF5]"
+              aria-expanded={pipelineExpanded}
+              aria-label={pipelineExpanded ? "收起流水线步骤" : "展开流水线步骤"}
+            >
+              <div className="flex items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <ProgressBar pct={progressPct} done={stageStatus === "done"} />
+                </div>
+                <ChevronDown
+                  size={18}
+                  strokeWidth={2}
+                  className={`shrink-0 text-rose-400/90 transition-transform duration-200 ${
+                    pipelineExpanded ? "rotate-180" : ""
+                  }`}
+                  aria-hidden
+                />
               </div>
+              {lastMessage ? (
+                <p className="mt-2.5 text-sm text-slate-500 leading-snug pr-8">{lastMessage}</p>
+              ) : null}
+            </button>
+
+            {pipelineExpanded ? (
+              <ol className="mt-4 space-y-2 max-h-60 overflow-auto scroll-soft pr-1 border-t border-rose-100/80 pt-4">
+                {progressEvents.slice(-30).map((ev, i) => {
+                  const Icon = stageIcon(ev.stage);
+                  const label = stageLabelMap[ev.stage ?? ""] ?? ev.stage ?? "?";
+                  return (
+                    <li
+                      key={`${ev.ts ?? ""}-${i}`}
+                      className="flex items-start gap-3 text-xs text-slate-600 leading-relaxed"
+                    >
+                      <Icon size={15} className="text-rose-500 shrink-0 mt-0.5" strokeWidth={2} />
+                      <span className="font-semibold text-slate-700 w-[4.5rem] shrink-0 pt-0.5">
+                        {label}
+                      </span>
+                      <span className="flex-1 min-w-0 text-slate-600">{ev.msg ?? ""}</span>
+                      <span className="text-slate-400 tabular-nums shrink-0 pt-0.5 font-medium">
+                        {ev.pct ?? "-"}%
+                      </span>
+                    </li>
+                  );
+                })}
+                {progressEvents.length === 0 ? (
+                  <li className="text-xs text-slate-400">尚无事件，等待后端推送…</li>
+                ) : null}
+              </ol>
             ) : null}
           </section>
         ) : null}
@@ -788,12 +777,12 @@ function StageBadge({ status }: { status: "idle" | "running" | "done" }) {
 function ProgressBar({ pct, done }: { pct: number; done: boolean }) {
   const pctClamped = Math.max(0, Math.min(100, pct || 0));
   return (
-    <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+    <div className="w-full h-3 rounded-full overflow-hidden bg-slate-200/90 shadow-inner">
       <div
-        className={`h-full transition-[width] duration-500 rounded-full ${
+        className={`h-full transition-[width] duration-500 ease-out rounded-full ${
           done
-            ? "bg-gradient-to-r from-emerald-400 to-emerald-500"
-            : "bg-gradient-to-r from-rose-400 to-orange-500"
+            ? "bg-gradient-to-r from-emerald-400 to-emerald-600"
+            : "bg-gradient-to-r from-orange-500 via-orange-500 to-rose-600"
         }`}
         style={{ width: `${done ? 100 : pctClamped}%` }}
       />

@@ -30,6 +30,11 @@
     @apply bg-white/80 backdrop-blur-sm border border-rose-100 rounded-2xl p-5 sm:p-6 shadow-sm;
   }
 
+  /* 处理进度卡：浅奶油底，贴近产品示意图 */
+  .card-progress {
+    @apply bg-[#FFFBF5]/95 backdrop-blur-sm border border-rose-100/90 rounded-2xl p-5 sm:p-6 shadow-sm;
+  }
+
   .btn-primary {
     @apply inline-flex items-center justify-center gap-2 h-10 px-5 rounded-xl
       bg-gradient-to-r from-rose-500 to-orange-500 text-white text-sm font-medium
