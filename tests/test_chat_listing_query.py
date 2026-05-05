@@ -2,9 +2,67 @@ import pandas as pd
 
 from server.tools.chat_listing_query import (
     ListingSearchIntent,
+    _expand_district_geo_keywords,
     apply_listing_search_intent,
     listings_to_llm_block,
 )
+
+
+def test_expand_district_keywords_suffix_any_city() -> None:
+    """「区」与不带「区」互列为关键词，不限定单一城市。"""
+    kws = _expand_district_geo_keywords("新都区")
+    assert "新都" in kws and "新都区" in kws
+    kws2 = _expand_district_geo_keywords("锦江")
+    assert "锦江" in kws2 and "锦江区" in kws2
+
+
+def test_district_short_form_row_matches_user_saying_full_suffix() -> None:
+    """表中 district 只有「新都」时，用户说「新都区」也应命中候选。"""
+    df = pd.DataFrame(
+        {
+            "district": ["新都", "新都", "武侯区"],
+            "location_raw": ["", "", ""],
+            "listing_title": ["", "", ""],
+            "community": ["", "", ""],
+            "description_raw": ["", "", ""],
+            "house_info_raw": ["", "", ""],
+            "follow_info_raw": ["", "", ""],
+            "unit_price": [1.0, 2.0, 3.0],
+        }
+    )
+    intent = ListingSearchIntent(needs_row_samples=True, district_contains="新都区", max_rows=10)
+    out, _ = apply_listing_search_intent(df, intent)
+    assert len(out) == 2
+
+
+def test_hard_require_tags_intersection_like_excel_and() -> None:
+    """必选标签：pandas 硬筛 AND，再排序取 TopN。"""
+    df = pd.DataFrame(
+        {
+            "district": ["新都区", "新都区", "新都区"],
+            "location_raw": ["", "", ""],
+            "listing_title": ["", "", ""],
+            "community": ["A", "B", "C"],
+            "description_raw": ["", "", ""],
+            "house_info_raw": ["", "", ""],
+            "follow_info_raw": ["", "", ""],
+            "tag_near_subway": [True, True, False],
+            "tag_lighting": [True, False, True],
+            "unit_price": [10000.0, 9000.0, 8000.0],
+        }
+    )
+    intent = ListingSearchIntent(
+        needs_row_samples=True,
+        district_contains="新都",
+        require_tag_near_subway=True,
+        require_tag_lighting=True,
+        max_rows=10,
+    )
+    out, note = apply_listing_search_intent(df, intent)
+    assert len(out) == 1
+    assert out.iloc[0]["community"] == "A"
+    assert note is not None
+    assert "硬条件" in note or "硬筛选" in note
 
 
 def test_district_no_geo_match_returns_empty_not_city_wide() -> None:

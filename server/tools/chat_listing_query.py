@@ -138,44 +138,74 @@ def _normal_family_layout_mask(df: pd.DataFrame) -> pd.Series:
     return m
 
 
+def _district_suffix_keyword_variants(token: str) -> list[str]:
+    """
+    通用地理关键词变体：同一行政片区的「带区/县后缀」与「不带后缀」互匹配，
+    不依赖固定城市——适用于各地二手房 district 字段写法不一致的情况。
+    """
+    s = token.strip()
+    if not s:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(x: str) -> None:
+        x = x.strip()
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+
+    add(s)
+    if s.endswith("区") and len(s) > 1:
+        add(s[:-1])
+    if s.endswith("县") and len(s) > 1:
+        add(s[:-1])
+    # 用户只说「锦江」「新都」等时，表里常为「锦江区」「新都区」
+    if not s.endswith(("区", "县", "市")) and len(s) >= 2:
+        add(s + "区")
+    return out
+
+
 def _expand_district_geo_keywords(raw: str) -> tuple[str, ...]:
     """
-    用户说的城区子串 + 常见别名，用于在 district/位置/标题/小区 多列 OR 匹配。
-    缓解「高新」写在 location、district 标成武侯/天府等」导致的 0 行。
+    用户说的城区子串：先做通用后缀变体，再合并少量常见别名（缓解高新写在正文等）。
     """
     s = raw.strip()
     if not s:
         return ()
-    variants: list[str] = [s]
+    seeds: list[str] = [s]
     if "高新" in s or s in ("高新区", "成都高新区"):
-        variants.extend(["高新", "高新区", "成都高新", "高新城南", "新川科技园", "新川"])
+        seeds.extend(["高新", "高新区", "成都高新", "高新城南", "新川科技园", "新川"])
     if "天府" in s:
-        variants.extend(["天府新区", "天府", "天新"])
+        seeds.extend(["天府新区", "天府", "天新"])
     if "温江" in s:
-        variants.extend(["温江", "温江区"])
+        seeds.extend(["温江", "温江区"])
     if "锦江" in s:
-        variants.extend(["锦江", "锦江区"])
+        seeds.extend(["锦江", "锦江区"])
     if "武侯" in s:
-        variants.extend(["武侯", "武侯区"])
+        seeds.extend(["武侯", "武侯区"])
     if "青羊" in s:
-        variants.extend(["青羊", "青羊区"])
+        seeds.extend(["青羊", "青羊区"])
     if "金牛" in s:
-        variants.extend(["金牛", "金牛区"])
+        seeds.extend(["金牛", "金牛区"])
     if "成华" in s:
-        variants.extend(["成华", "成华区"])
+        seeds.extend(["成华", "成华区"])
     if "郫" in s or "郫县" in s:
-        variants.extend(["郫都", "郫都区", "郫县"])
+        seeds.extend(["郫都", "郫都区", "郫县"])
     if "双流" in s:
-        variants.extend(["双流", "双流区"])
+        seeds.extend(["双流", "双流区"])
     if "龙泉" in s:
-        variants.extend(["龙泉驿", "龙泉驿区", "龙泉"])
+        seeds.extend(["龙泉驿", "龙泉驿区", "龙泉"])
+    if "新都" in s:
+        seeds.extend(["新都", "新都区"])
+
     seen: set[str] = set()
     out: list[str] = []
-    for v in variants:
-        v = v.strip()
-        if v and v not in seen:
-            seen.add(v)
-            out.append(v)
+    for seed in seeds:
+        for v in _district_suffix_keyword_variants(seed):
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
     return tuple(out)
 
 
@@ -251,6 +281,18 @@ class ListingSearchIntent(BaseModel):
     lighting_preferred: bool | None = Field(
         default=None,
         description="用户强调采光/通透/全明时填 true；标签与正文关键词联合加分",
+    )
+    require_tag_near_subway: bool = Field(
+        default=False,
+        description="用户明确要求「必须近地铁/一定要地铁旁/同时满足近地铁」等：pandas 硬筛 tag_near_subway==True（空值视为不满足）",
+    )
+    require_tag_lighting: bool = Field(
+        default=False,
+        description="用户明确要求「必须采光好/一定要全明」等：硬筛 tag_lighting==True",
+    )
+    require_tag_has_balcony: bool = Field(
+        default=False,
+        description="用户明确要求必须有阳台：硬筛 tag_has_balcony==True",
     )
     subway_station_contains: str | None = Field(
         default=None,
@@ -380,10 +422,69 @@ def _intent_relevance_scores(df: pd.DataFrame, intent: ListingSearchIntent) -> p
 
 
 _SCORE_RANK_NOTE = (
-    "[查询说明] 以下为按与条件的**相关度打分**排序后的样本（已尽量剔除疑似车位、异常大户型，"
-    "并对 2～6 室成套住宅额外加权）。标签与正文关键词均参与计分。"
-    "价格等为偏好加权而非硬性剔除（单价/总价仍可在样本中高于您口头区间）。\n"
+    "[查询说明] 以下为 pandas 在会话清洗表上的查询结果：先做城区/噪声收缩，"
+    "若意图含「必须」类标签则再做硬筛选，其余条件按**相关度打分**排序取 TopN。"
+    "（已尽量剔除疑似车位、异常大户型；2～6 室成套住宅额外加权。）"
+    "价格等为偏好加权而非硬性剔除，除非您在意图中选择了必选标签。\n"
 )
+
+
+def _hard_filters_applied_line(intent: ListingSearchIntent) -> str | None:
+    parts: list[str] = []
+    if intent.require_tag_near_subway:
+        parts.append("近地铁标签为真")
+    if intent.require_tag_lighting:
+        parts.append("采光标签为真")
+    if intent.require_tag_has_balcony:
+        parts.append("阳台标签为真")
+    if not parts:
+        return None
+    return "[查询说明] 已按硬条件筛选（NaN 视为不满足）：" + "、".join(parts) + "。\n"
+
+
+def _apply_hard_tag_requirements(df: pd.DataFrame, intent: ListingSearchIntent) -> tuple[pd.DataFrame, str | None]:
+    """AND：必选 tag_* 全为 True；缺列则无法验证，返回空并说明。"""
+    w = df
+    if intent.require_tag_near_subway:
+        if "tag_near_subway" not in w.columns:
+            return (
+                w.iloc[0:0].copy(),
+                "[查询说明] 表中无 tag_near_subway 列，无法执行「必须近地铁」硬筛选。\n",
+            )
+        m = w["tag_near_subway"].fillna(False).astype(bool)
+        w = w.loc[m].copy()
+        if w.empty:
+            return (
+                w,
+                "[查询说明] 硬条件：tag_near_subway 须为真（空值为否）；当前候选内无满足行。\n",
+            )
+    if intent.require_tag_lighting:
+        if "tag_lighting" not in w.columns:
+            return (
+                w.iloc[0:0].copy(),
+                "[查询说明] 表中无 tag_lighting 列，无法执行「必须采光好」硬筛选。\n",
+            )
+        m = w["tag_lighting"].fillna(False).astype(bool)
+        w = w.loc[m].copy()
+        if w.empty:
+            return (
+                w,
+                "[查询说明] 硬条件：tag_lighting 须为真；当前候选内无满足行。\n",
+            )
+    if intent.require_tag_has_balcony:
+        if "tag_has_balcony" not in w.columns:
+            return (
+                w.iloc[0:0].copy(),
+                "[查询说明] 表中无 tag_has_balcony 列，无法执行「必须有阳台」硬筛选。\n",
+            )
+        m = w["tag_has_balcony"].fillna(False).astype(bool)
+        w = w.loc[m].copy()
+        if w.empty:
+            return (
+                w,
+                "[查询说明] 硬条件：tag_has_balcony 须为真；当前候选内无满足行。\n",
+            )
+    return w, None
 
 
 def _candidate_frame_for_intent(df: pd.DataFrame, intent: ListingSearchIntent) -> pd.DataFrame:
@@ -435,6 +536,10 @@ def apply_listing_search_intent(
             "[查询说明] 当前城区候选经剔除车位/异常户型后无剩余行；可尝试放宽条件或检查数据。\n",
         )
 
+    work, hard_note = _apply_hard_tag_requirements(work, intent)
+    if work.empty:
+        return work, hard_note
+
     scores = _intent_relevance_scores(work, intent)
     work["_rel_score"] = scores
     tie = (
@@ -446,6 +551,10 @@ def apply_listing_search_intent(
     work = work.sort_values(by=["_rel_score", "_tie_cheap"], ascending=[False, True], na_position="last")
     out = work.head(int(intent.max_rows)).drop(columns=["_rel_score", "_tie_cheap"], errors="ignore").copy()
     note = _SCORE_RANK_NOTE.rstrip() if len(out) > 0 else None
+    if note and len(out) > 0:
+        extra = _hard_filters_applied_line(intent)
+        if extra:
+            note = extra.rstrip() + "\n" + note
     return out, note
 
 
@@ -465,19 +574,31 @@ _INTENT_SYSTEM = """你是查询意图解析器。输入中可能包含「用户
 若此前已指定城区/预算/户型等，而当前句只是在补充「采光」「地铁」「便宜点」等，则必须**继承**前述约束（除非当前句明确改掉，如「换成双流」）。
 仅当用户明确要「房源列表、推荐几套、筛选某区/小区/价位、有哪些房子」等需要行级数据时，将 needs_row_samples 设为 true。
 
-价格字段（min_unit_price、max_unit_price、min_total_price_wan、max_total_price_wan）：
-仅当用户**明确说出数字或明确区间**（如「单价一万二以下」「总价 150 万以内」）时才填写。
-禁止把对话摘要里的 p25、p50、中位数、均价等统计值擅自当成筛选上下限——用户只说「不太贵」「中等价位」等模糊话时，这些价格字段应留空。
+后端会用 pandas 在**本会话的清洗表**上执行：城区收缩 →（可选）必选标签硬筛选 → 其余维度打分取 TopN。**不要用会话摘要里的总套数、均价等替代真实筛选结果。**
 
-地理与地铁（后端按**相关度打分**，非硬性一条条过滤）：
-- district_contains：区或板块（高新、天府新区等）；系统在 district/位置/标题/正文等多处软匹配。
-- 用户提到地铁、号线、步行到站：near_subway=true；正文含「地铁」「号线」也会加分。若能识别站名，填 subway_station_contains。
-- 阳台/露台：has_balcony=true（标签与正文「阳台」等并列加分）。
-- 采光/通透/全明：lighting_preferred=true。
-- 房龄：min_build_year（整数年份），命中加分。
+district_contains：
+填写用户口中的区县或板块原词即可（如「新都区」「新都」「锦江区」「锦江」）；后端会自动做「带区/不带区」互匹配，不限定某一城市。
+
+硬条件 vs 软偏好（务必区分）：
+- **硬筛选（Excel 式 AND）**：用户说「必须」「一定要」「同时满足」「筛选出同时…」「只要标签为真的」时，将对应项设为 true：
+  - require_tag_near_subway：必须 tag_near_subway 为真（表中空值视为不满足）。
+  - require_tag_lighting：必须 tag_lighting 为真。
+  - require_tag_has_balcony：必须 tag_has_balcony 为真。
+  可同时设多个硬条件（全部满足才保留）。
+- **软偏好（排序加权）**：用户只说「优先地铁」「最好采光好」「倾向朝南」等，用 near_subway / lighting_preferred / has_balcony 等为 true，但**不要**打开 require_*。
+
+地理软偏好：
+- near_subway=true：重视地铁；正文含「地铁」「号线」也会加分。
+- subway_station_contains：站名子串。
+- has_balcony、lighting_preferred：阳台、采光偏好（软）。
+- min_build_year：房龄偏好（软）。
+
+价格字段（min_unit_price、max_unit_price、min_total_price_wan、max_total_price_wan）：
+仅当用户**明确说出数字或明确区间**时才填写。
+禁止把摘要里的 p25、p50、中位数当成筛选上下限。
 
 其它：community_contains、layout_contains 按需填写。
-用户表达「三室/四室/适合几口人住」时须填写 layout_contains（如 三室、3室），以便返回成套住宅而非车位等。
+用户表达「三室/四室」须填 layout_contains（如 三室、3室），以便排除车位等噪声。
 
 若用户只是问统计、政策、概念或与具体表无关的问题，needs_row_samples 必须为 false，其它字段留空。"""
 
